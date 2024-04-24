@@ -8,7 +8,11 @@
 py파일이 존재하는 경로에 같이 존재해야합니다.<br/>
 
 ---
-## GridWorld_Composition.py
+## GridWorld_Composition(Old).py
+사람용으로 짜여진 임시 코드입니다. <br/>
+
+---
+## gridworld_composition.py
 실제 렌더링될 환경입니다.<br/>
 방향키로 이동하며, 스페이스바로 아이템을 수집할 수 있습니다.<br/>
 수집된 아이템은 인벤토리에 저장됩니다.<br/>
