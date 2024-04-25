@@ -1,94 +1,50 @@
-#%% 1. Test Random Environment with OpenAI Gym
-from gym import Env
-from gym.spaces import Discrete, Box
-import numpy as np
-import random
+from pynput import keyboard
+import time
+
+G_switch = True
+key_switch = False
+act = -1
+
+def key_press(key):
+    global key_switch, act
+    if not key_switch:
+        if key == keyboard.Key.space:
+            act = 0
+        elif key == keyboard.Key.right:
+            act = 1
+        elif key == keyboard.Key.up:
+            act = 2
+        elif key == keyboard.Key.left:
+            act = 3
+        elif key == keyboard.Key.down:
+            act = 4
+        key_switch = True
+
+def key_release(key):
+    global key_switch, G_switch
+    key_switch = False
+    if key == keyboard.Key.esc:
+        G_switch = False
+        return False
+
+listener = keyboard.Listener(on_press=key_press, on_release=key_release)
+listener.start()
+
+while G_switch:
+    print(act)
+    act = -1
+    time.sleep(0.1)
+
+del listener
 
 #%%
-class ShowerEnv(Env):
-    def __init__(self):
-        # Actions we can take, down, stay, up
-        self.action_space = Discrete(3)
-        # Temperature array
-        self.observation_space = Box(low=np.array([0]), high=np.array([100]))
-        # Set start temp
-        self.state = 38 + random.randint(-3,3)
-        # Set shower length
-        self.shower_length = 60
-        
-    def step(self, action):
-        # Apply action
-        # 0 -1 = -1 temperature
-        # 1 -1 = 0 
-        # 2 -1 = 1 temperature 
-        self.state += action -1 
-        # Reduce shower length by 1 second
-        self.shower_length -= 1 
-        
-        # Calculate reward
-        if self.state >=37 and self.state <=39: 
-            reward =1 
-        else: 
-            reward = -1 
-        
-        # Check if shower is done
-        if self.shower_length <= 0: 
-            done = True
-        else:
-            done = False
-        
-        # Apply temperature noise
-        #self.state += random.randint(-1,1)
-        # Set placeholder for info
-        info = {}
-        
-        # Return step information
-        return self.state, reward, done, info
 
-    def render(self):
-        # Implement viz
-        pass
-    
-    def reset(self):
-        # Reset shower temperature
-        self.state = 38 + random.randint(-3,3)
-        # Reset shower time
-        self.shower_length = 60 
-        return self.state
+a=2
 
-#%%
-env = ShowerEnv()
-env.observation_space.sample()
+def Test():
+    if a ==2:
+        return 'no'
+        print('a')
+    return a
 
-#%%
-episodes = 10
-for episode in range(1, episodes+1):
-    state = env.reset()
-    done = False
-    score = 0 
-    
-    while not done:
-        #env.render()
-        action = env.action_space.sample()
-        n_state, reward, done, info = env.step(action)
-        score+=reward
-    print('Episode:{} Score:{}'.format(episode, score))
-    
-#%% 2. Create a Deep Learning Model with Keras
-import numpy as np
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Flatten
-from tensorflow.keras.optimizers import Adam
-
-#%%
-states = env.observation_space.shape
-actions = env.action_space.n
-
-#%%
-"""
-env = gym.make('CartPole-v0')
-states = env.observation_space.shape[0]
-actions = env.action_space.n
-
-print(actions)
-"""
+print(Test())
