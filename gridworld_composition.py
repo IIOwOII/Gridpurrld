@@ -7,7 +7,7 @@ import numpy as np
 
 #%%
 class GCEnv(gym.Env):
-    def __init__(self, render_mode='human', stage_total=1):
+    def __init__(self, render_mode='human'):
         ## 화면 출력 여부 설정
         self.render_mode = render_mode
         self.screen = None
@@ -15,7 +15,6 @@ class GCEnv(gym.Env):
         
         ## 게임 기본 요소 설정
         self.G_clock = None # Time
-        self.G_stage_total = stage_total # 한 에피소드 당 스테이지 수
         self.grid_num = (9,7) # 맵의 크기 (나중에 고칠 것)
         
         # 내부 클래스 선언
@@ -24,45 +23,34 @@ class GCEnv(gym.Env):
         
         ## Action 유형 선언
         self.action_space = spaces.Discrete(5) # 0:pick, (1,2,3,4):move
+        self.action = -1
    
     
     def step(self, action):
         # 플레이어 액션
-        self.G_player.action(action)
+        self.action = action
+        self.G_player.action(self.action)
         
+        # state
         CC = self.content_classifier()
-        
-        # 아이템 3개를 모두 수집한 경우
-        if (self.G_player.inventory_num == 3):
-            self.reward = self.reward_check() # 인벤토리 검사
-            self.G_player.reset() # 플레이어 리셋
-            self.G_stage_change = True # 다음 스테이지로
-            self.G_stage_number += 1 # 다음 스테이지로
-        else:
-            self.reward = 0
-        
-        # 스테이지가 처음 시작되었을 경우
-        if self.G_stage_change:
-            self.G_item = self.ItemCreator(0,0) # 아이템 생성 (나중에 고칠 것)
-            self.G_stage_change = False
-            self.render_reset()
-        
-        # state : [X,Y,Action,]
-        # numpy는 리소스 너무 많이 잡아먹어서 튜플로?
-        #self.observation = np.array([])
-        self.observation = (self.G_player.position[0], self.G_player.position[1], action,
-                            self.G_player.inventory_num, CC)
+        IR = self.iteminfo_returner()
+        PR = self.playerpos_returner()
+        self.observation = np.array(lst_flatten(
+            [PR, self.G_player.inventory_num, CC, IR]))
         
         # placeholder
         self.info = {}
         
-        # 모든 스테이지가 끝난 경우 (한 에피소드가 끝난 경우)
-        if (self.G_stage_number >= self.G_stage_total):
+        # 아이템 3개를 모두 수집한 경우
+        if (self.G_player.inventory_num == 3):
+            self.reward = self.reward_check() # 인벤토리 검사
             self.done = True
         else:
+            self.reward = -1
             self.done = False
-
+        
         return self.observation, self.reward, self.done, self.info
+    
     
     def content_classifier(self):
         """
@@ -105,6 +93,40 @@ class GCEnv(gym.Env):
              inv[0].content[2]*inv[1].content[2]*inv[2].content[2])
         return CM
     
+    
+    def playerpos_returner(self):
+        """
+        플레이어의 위치를 onehot 형식으로 반환해준다.
+        """
+        # 그리드 크기만큼의 PR list 생성
+        PR = [0 for idx in range(self.grid_num[0]*self.grid_num[1])]
+        
+        # 플레이어가 존재하는 좌표 찾고, PR list에 onehot
+        player_pos = self.G_player.position[1]*self.grid_num[0]+self.G_player.position[0]
+        PR[player_pos] = 1
+        
+        return PR
+    
+    def iteminfo_returner(self):
+        """
+        현재 맵에 존재하는 아이템의 정보를 반환해준다.
+        1. gridworld size가 9*7이면, 총 63칸의 list를 만든다.
+        2. 아이템이 (x,y)에 위치하고 content는 (a,b,c)라면, list의 x+y*9번째 칸에 cba(4진법)을 입력한다.
+        예1_ 위치(4,0),content(2,0,0)[삼각형,색없음]: list[4]=2
+        예2_ 위치(3,2),content(1,3,0)[원,파랑색]: list[21]=13
+        """
+        # 그리드 크기만큼의 IR list 생성
+        IR = [0 for idx in range(self.grid_num[0]*self.grid_num[1])]
+        
+        # 아이템이 존재하는 좌표 찾고, IR list에 content 입력
+        for item in self.G_item:
+            if not item.collected:
+                item_pos = item.position[1]*self.grid_num[0]+item.position[0]
+                IR[item_pos] = item.content[0]+4*item.content[1]+16*item.content[2]
+            
+        return IR
+
+    
     def reward_check(self):
         # 인벤토리 내부에는 3개의 아이템 content가 들어있을 것
         if (self.G_player.inventory_num != 3):
@@ -114,9 +136,9 @@ class GCEnv(gym.Env):
         
         # CM를 통해 reward를 주는 방식은 아래 코드를 수정하여 고칠 수 있다.
         if any((CM[0]==1,CM[0]==8,CM[0]==27,CM[0]==6)):
-            reward = 1
+            reward = 500
         else:
-            reward = -1
+            reward = 100
         
         return reward
         
@@ -178,6 +200,10 @@ class GCEnv(gym.Env):
             gym.logger.warn("You have to specify the render_mode. etc: human")
             return
         
+        # 렌더 모드가 agent인 경우
+        if (self.render_mode == 'agent'):
+            return
+        
         # 화면에 띄운 창이 없는 경우
         if self.screen is None:
             pg.init() # 창 띄우기
@@ -227,7 +253,6 @@ class GCEnv(gym.Env):
         self.screen.blit(self.G_player.spr, self.G_player.rect)
         
         if (self.render_mode == "human"):
-            pg.event.pump()
             self.G_clock.tick(G_FPS)
             pg.display.update()
         elif (self.render_mode == "rgb_array"):
@@ -236,12 +261,21 @@ class GCEnv(gym.Env):
     
     # 한 에피소드가 끝났을 때
     def reset(self):
-        # 게임 요소 설정
-        self.G_stage_change = True # 새 스테이지 시작 여부
-        self.G_stage_number = 0 # 현재 스테이지
-        #
+        # Reset
+        self.G_item = self.ItemCreator(0,0) # 아이템 생성 (나중에 고칠 것)
         self.G_player.reset()
         self.render_reset()
+        self.done = False
+
+        # State
+        CC = self.content_classifier()
+        IR = self.iteminfo_returner()
+        PR = self.playerpos_returner()
+        self.observation = np.array(lst_flatten(
+            [PR, self.G_player.inventory_num, CC, IR]))
+        
+        return self.observation
+    
     
     # 게임 종료
     def close(self):
@@ -297,8 +331,17 @@ class GCEnv(gym.Env):
                 self.position = (self.position[0], self.position[1]+1)
             
         # 리셋
-        def reset(self):
-            environment = self.environment # 플레이어가 위치한 환경
+        def reset(self, position=None):
+            # 플레이어가 위치한 환경 정의
+            environment = self.environment
+            
+            # 위치 설정
+            if position is None: # 입력 변수가 없다면 현재 자리 그대로
+                pass
+            else:
+                self.position = position
+            
+            # 인벤토리 비우기
             self.inventory = [environment.Item(environment),
                               environment.Item(environment),
                               environment.Item(environment)]
@@ -384,13 +427,25 @@ def load_sound(file):
     return None
 
 
+#%% 
+# 다중 리스트를 단일 리스트로 변환
+def lst_flatten(lst):
+    res = []
+    for ele in lst:
+        if isinstance(ele, list) or isinstance(ele, tuple): # 원소가 리스트 또는 튜플일 경우
+            res.extend(lst_flatten(ele))
+        else:
+            res.append(ele)
+    return res
+
+
 #%% Main
 
 # 파일 경로 설정
 dir_main = os.path.split(os.path.abspath(__file__))[0]
 
 # 게임 상수 설정
-G_FPS = 30
+G_FPS = 100
 C_white = (255,255,255)
 C_black = (0,0,0)
 C_border = (96,96,96)
@@ -398,61 +453,292 @@ C_inside = (192,192,192)
 C_lightgreen = (170,240,180)
 
 
-#%% 사람 플레이
+# #%% 사람 플레이
+# from pynput import keyboard
 
-from pynput import keyboard
+# G_switch = True
+# key_switch = False
+# act = -1
 
-G_switch = True
-key_switch = False
-act = -1
+# def key_press(key):
+#     global key_switch, act
+#     if not key_switch:
+#         if key == keyboard.Key.space:
+#             act = 0
+#         elif key == keyboard.Key.right:
+#             act = 1
+#         elif key == keyboard.Key.up:
+#             act = 2
+#         elif key == keyboard.Key.left:
+#             act = 3
+#         elif key == keyboard.Key.down:
+#             act = 4
+#         key_switch = True
 
-def key_press(key):
-    global key_switch, act
-    if not key_switch:
-        if key == keyboard.Key.space:
-            act = 0
-        elif key == keyboard.Key.right:
-            act = 1
-        elif key == keyboard.Key.up:
-            act = 2
-        elif key == keyboard.Key.left:
-            act = 3
-        elif key == keyboard.Key.down:
-            act = 4
-        key_switch = True
+# def key_release(key):
+#     global key_switch, G_switch, act
+#     key_switch = False
+#     if key == keyboard.Key.esc:
+#         G_switch = False
+#         return False
 
-def key_release(key):
-    global key_switch, G_switch, act
-    key_switch = False
-    if key == keyboard.Key.esc:
-        G_switch = False
-        return False
+# steps = int(input('플레이 스텝을 입력(step): '))
 
-steps = int(input('플레이 스텝을 입력(step): '))
+# listener = keyboard.Listener(on_press=key_press, on_release=key_release)
+# listener.start()
 
-listener = keyboard.Listener(on_press=key_press, on_release=key_release)
-listener.start()
+# # 환경 구성
+# env = GCEnv()
+# env.reset()
 
+# # 게임 플레이
+# step = 0
+
+# while G_switch and (step<steps):
+#     if act != -1:
+#         info = env.step(act)
+#         step += 1
+#         act = -1
+#         print(info)
+#     else:
+#         pass
+#     env.render()
+
+# del listener
+# env.close()
+
+
+#%% keras 모델링
+import tensorflow.keras as tfk
+import tensorflow as tf
+from collections import deque
+import random
+import matplotlib.pyplot as plt
+
+# Q network의 output은 각 action에 대한 Q값이다.
+def Q_network(shape_state, shape_action):
+    Layers = [tfk.layers.Dense(units=256, name='State', activation='relu', input_dim=shape_state),
+              tfk.layers.Dense(units=256, name='Hidden', activation='relu'),
+              tfk.layers.Dense(units=shape_action, name='Action', activation='linear')]
+    q_net = tfk.models.Sequential(Layers, name='NN')
+    q_net.compile(optimizer='Adam', loss='mse')
+    return q_net
+
+
+class ReplayBuffer:
+    def __init__(self, buffer_size):
+        # 가장 오래된 replay memory부터 지우는 deque로 정의
+        self.buffer_size = buffer_size
+        self.buffer = deque(maxlen=self.buffer_size)
+    
+    def sample(self, batch_size):
+        # batch_size만큼 replay memory 샘플링
+        if (len(self.buffer) > batch_size):
+            size = batch_size
+        else:
+            size = len(self.buffer)
+        return random.sample(self.buffer, size)
+    
+    def clear(self):
+        # buffer 제거
+        self.buffer.clear()
+    
+    def append(self, transition):
+        self.buffer.append(transition)
+    
+    def __len__(self):
+        return len(self.buffer)
+
+
+class Agent_DQN:
+    def __init__(self, env, q_net, gamma=0.99, epsilon=1.0, epsilon_decay=0.995, 
+                  buffer_size=2000, batch_size=64, episode_limit=20, step_truncate=1000, step_target_update=100):
+        # 환경 입력
+        self.env = env
+        
+        # policy 초기화
+        self.Qnet_behavior = q_net
+        self.Qnet_target = q_net
+        
+        # state와 action의 dimension
+        self.S_dim = q_net.layers[0].input.shape[1]
+        self.A_dim = q_net.layers[len(q_net.layers)-1].output.shape[1]
+        
+        # Discount factor
+        self.gamma = gamma
+        
+        # Exploration factor
+        self.epsilon = epsilon
+        self.epsilon_decay = epsilon_decay
+        
+        # DQN 특성
+        self.buffer_size = buffer_size
+        self.batch_size = batch_size
+        self.step_target_update = step_target_update # target network를 업데이트하는 주기
+        self.replay_buffer = ReplayBuffer(self.buffer_size)
+        
+        # 딥러닝
+        self.loss_func = tfk.losses.MeanSquaredError() # loss는 MSE로 계산
+        self.optimizer = tfk.optimizers.Adam() # 그래디언트 디센트 기법은 Adam으로
+        
+        # 최대 에피소드 & 한 에피소드 당 최대 스텝 수 설정
+        self.step_truncate = step_truncate
+        self.episode_limit = episode_limit
+        
+    
+    @tf.function
+    def learn(self, S, A, S_next, R, done):
+        """
+        Q 함수를 예측하는 Q net을 학습
+        S = state(t)
+        A = action(t)
+        S_next = state(t+1)
+        R = reward(t+1)
+        """
+        Q_target = R + (1-done)*self.gamma*tf.reduce_max(self.Qnet_target(S_next), axis=1, keepdims=True)
+        
+        with tf.GradientTape() as tape:
+            Q_behavior = self.Qnet_behavior(S)
+            A_onehot = tf.one_hot(tf.cast(tf.reshape(A, [-1]), tf.int32), self.A_dim)
+            Q_behavior = tf.reduce_sum(Q_behavior*A_onehot, axis=1, keepdims=True)
+            loss = self.loss_func(Q_target, Q_behavior)
+        grads = tape.gradient(loss, self.Qnet_behavior.trainable_weights)
+        self.optimizer.apply_gradients(zip(grads, self.Qnet_behavior.trainable_weights))
+    
+    
+    # state가 주어졌을 때 action을 선택하는 방식
+    def epsilon_greedy(self, S):
+        # 탐색률 업데이트 (최소 0.01까지만)
+        self.epsilon = max(self.epsilon, 0.01)
+        if np.random.rand() <= self.epsilon: # 탐색
+            return np.random.randint(self.A_dim)
+        else:
+            A = self.Qnet_behavior(S[np.newaxis])
+            #return np.random.choice(range(self.A_dim), p=A[0].numpy())
+            return np.argmax(A[0])
+    
+    
+    def target_update(self):
+        self.Qnet_target.set_weights(self.Qnet_behavior.get_weights())
+            
+    
+    def train(self):
+        """
+        S = state(t)
+        A = action(t)
+        S_next = state(t+1)
+        R = reward(t+1)
+        G = return
+        """
+        epochs = 0
+        global_step = 0
+        G_list = []
+        while epochs < self.episode_limit:
+            S = env.reset()
+            G = 0
+            step = 0
+            while step < self.step_truncate:
+                A = self.epsilon_greedy(S) # 
+                S_next, R, done, _ = env.step(A)
+                
+                # Replay Buffer 생성
+                transition = (S, A, S_next, R, done)
+                self.replay_buffer.append(transition)
+                
+                # return(한 에피소드 내 모든 보상, 따라서 gamma decay 안함)과 state update
+                G += R
+                S = S_next
+                
+                self.env.render()
+                
+                if (global_step%100)==0:
+                    print(global_step)
+                
+                # replay buffer가 충분히 모이면 Qnet 학습 시작
+                if global_step > 1000:
+                    transitions = self.replay_buffer.sample(batch_size=self.batch_size)
+                    self.learn(*map(lambda x: np.vstack(x).astype('float32'), np.transpose(transitions)))
+                
+                # step update
+                step += 1
+                global_step += 1
+                
+                # 
+                if done:
+                    break
+            
+            #
+            G_list.append(G)
+            self.target_update()
+            print(f'episode:{epochs+1}, score:{G}, step:{step}')
+            
+            # episode & epsilon update
+            epochs += 1
+            self.epsilon *= self.epsilon_decay
+        
+        # 학습 종료
+        env.close()
+        
+        # reward 출력
+        plt.title('Composition Gridworld')
+        plt.xlabel('Episode')
+        plt.ylabel('Return')
+        plt.plot(G_list)
+        plt.show()
+
+
+#%% CNN
+import cv2
+
+# This function can resize to any shape, but was built to resize to 84x84
+def process_frame(frame, shape=(84, 84)):
+    """Preprocesses a 210x160x3 frame to 84x84x1 grayscale
+    Arguments:
+        frame: The frame to process.  Must have values ranging from 0-255
+    Returns:
+        The processed frame
+    """
+
+    # cv2를 통한 데이터 감소를 이용하기 위해선 반드시 데이터 형을 np.uint8로 만들어야함
+    frame = frame.astype(np.uint8)
+
+    # RGB -> GRAY로 색 변경
+    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+
+    # 프레임을 crop한다 ([0~34, 160 ~ 160+34] 범위 삭제 )
+    frame = frame[34:34+160, :160]
+
+    # 크기를 인자로 전달된 shape로 리사이징 한다
+    frame = cv2.resize(frame, shape, interpolation=cv2.INTER_NEAREST)
+
+    # reshape한다
+    frame = frame.reshape((*shape, 1))
+
+    return frame
+
+
+#%% GPU 사용 가능 여부 확인
+"""
+from tensorflow.python.client import device_lib
+
+print(device_lib.list_local_devices())
+tf.debugging.set_log_device_placement(True)
+strategy = tf.distribute.MirroredStrategy(devices=["/GPU:0","/GPU:1"])
+gpus = tf.config.experimental.list_physical_devices('GPU') # 호스트 러나임에 표시되는 GPU 장치 목록 반환
+"""
+
+#%% DQN 학습
 # 환경 구성
-env = GCEnv()
-env.reset()
+env = GCEnv(render_mode='human')
 
-# 게임 플레이
-step = 0
+# 모델 구성
+shape_state = env.grid_num[0]*env.grid_num[1]*2 + 10
+shape_action = env.action_space.n
+q_net = Q_network(shape_state, shape_action)
+q_net.summary() # 모델 정보
 
-while G_switch and (step<steps):
-    if act != -1:
-        info = env.step(act)
-        step += 1
-        act = -1
-        print(info)
-    else:
-        pass
-    env.render()
+# 모델 구조 시각화
+#tfk.utils.plot_model(q_net, show_shapes=True, show_layer_activations=True)
 
-del listener
-env.close()
-
-
-#%% 
-
+agent = Agent_DQN(env=env, q_net=q_net, step_truncate=1000, episode_limit=1000)
+agent.train()
