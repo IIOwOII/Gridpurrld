@@ -28,7 +28,12 @@ class GCEnv(gym.Env):
         self.action = -1
         
         ## State 크기 정보 (obs와 함께 직접 수정해야 함)
-        self.state_space = grid_num[0]*grid_num[1]*2 + 10
+        self.state_space = (grid_num[0]*grid_num[1]*2 + 10) *2
+        
+        ## 이전 State
+        self.M_CC = self.content_classifier()
+        self.M_IR = self.iteminfo_returner()
+        self.M_PR = self.playerpos_returner()
    
     
     def step(self, action):
@@ -42,12 +47,19 @@ class GCEnv(gym.Env):
         # 액션 이후, 플레이어 인벤토리 정보
         inv_after = self.G_player.inventory_num
         
-        # state
+        ## State 구성
         CC = self.content_classifier()
         IR = self.iteminfo_returner()
         PR = self.playerpos_returner()
+        
+        # State
         self.observation = np.array(lst_flatten(
-            [PR, self.G_player.inventory_num, CC, IR]))
+            [[inv_before, self.M_PR, self.M_CC, self.M_IR], [inv_after, PR, CC, IR]]))
+        
+        # Past State Update
+        self.M_CC = CC.copy()
+        self.M_IR = IR.copy()
+        self.M_PR = PR.copy()
         
         # placeholder
         self.info = {}
@@ -55,7 +67,7 @@ class GCEnv(gym.Env):
         # reward and done
         if (inv_after == inv_before): # 아이템 미수집 시
             if (action==0): 
-                self.reward = -5 # 허공에서 수집 액션한 경우
+                self.reward = -3 # 허공에서 수집 액션한 경우
             else:
                 self.reward = -1 # 이동한 경우
             self.done = False
@@ -64,7 +76,7 @@ class GCEnv(gym.Env):
                 self.reward = self.reward_check() # 아이템 모두 모은 경우 인벤토리 검사
                 self.done = True
             else: 
-                self.reward = 0 # 아직 아이템을 모두 모으지 못한 경우
+                self.reward = 5 # 아직 아이템을 모두 모으지 못한 경우
                 self.done = False
         else: # 버그 색출
             self.close()
@@ -157,9 +169,9 @@ class GCEnv(gym.Env):
         
         # CM를 통해 reward를 주는 방식은 아래 코드를 수정하여 고칠 수 있다.
         if any((CM[0]==1,CM[0]==8,CM[0]==27,CM[0]==6)):
-            reward = 500
+            reward = 250
         else:
-            reward = 100
+            reward = 50
         
         return reward
         
@@ -282,18 +294,31 @@ class GCEnv(gym.Env):
     
     # 한 에피소드가 끝났을 때
     def reset(self):
+        # 리셋 이전, 플레이어 인벤토리 정보
+        inv_before = self.G_player.inventory_num
+        
         # Reset
         self.G_item = self.ItemCreator(self.stage_type) # 아이템 생성 (나중에 고칠 것)
         self.G_player.reset()
         self.render_reset()
         self.done = False
+        
+        # 리셋 이후, 플레이어 인벤토리 정보
+        inv_after = self.G_player.inventory_num
 
         # State
         CC = self.content_classifier()
         IR = self.iteminfo_returner()
         PR = self.playerpos_returner()
+        
+        # State
         self.observation = np.array(lst_flatten(
-            [PR, self.G_player.inventory_num, CC, IR]))
+            [[inv_before, self.M_PR, self.M_CC, self.M_IR], [inv_after, PR, CC, IR]]))
+        
+        # Past State Update
+        self.M_CC = CC.copy()
+        self.M_IR = IR.copy()
+        self.M_PR = PR.copy()
         
         return self.observation
     
@@ -601,6 +626,8 @@ class ReplayBuffer:
 
 
 #%% DQN
+#class Network_
+
 class Network_Q(nn.Module):
     """
     Network_Q의 output은 각 action에 대한 Q값이다.
@@ -1085,7 +1112,7 @@ def result_record(agent):
 
 #%% Agent 학습
 # 환경 구성
-env = GCEnv(render_mode='human', stage_type=1, grid_num=(4,4))
+env = GCEnv(render_mode='human', stage_type=1, grid_num=(5,5))
 
 # DQN
 agent = Agent_DQN(env=env, step_truncate=500, episode_limit=500)
