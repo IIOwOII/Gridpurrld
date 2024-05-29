@@ -5,10 +5,12 @@ import pygame as pg
 import os
 import numpy as np
 import random
+import math
 
 #%%
 class GCEnv(gym.Env):
-    def __init__(self, render_mode='human', stage_type=0, grid_num=(9,7)):
+    def __init__(self, render_mode=None, stage_type=0, grid_num=(9,7),
+                 reward_set=(500,100,10,4,2)):
         ## 화면 출력 여부 설정
         self.render_mode = render_mode
         self.screen = None
@@ -35,8 +37,13 @@ class GCEnv(gym.Env):
         self.M_IR = self.iteminfo_returner()
         self.M_PR = self.playerpos_returner()
         
-        
-   
+        ## Reward 설정
+        self.R_rule = math.log(reward_set[0], 1000) # composition
+        self.R_full = math.log(reward_set[1], 1000) # just make 3 item
+        self.R_item = math.log(reward_set[2], 1000) # take 1 item
+        self.R_step = -math.log(reward_set[3], 1000) # take 1 step
+        self.R_vain = -math.log(reward_set[4], 1000) # wrong forage
+
     
     def step(self, action):
         # 액션 이전, 플레이어 인벤토리 정보
@@ -69,16 +76,16 @@ class GCEnv(gym.Env):
         # reward and done
         if (inv_after == inv_before): # 아이템 미수집 시
             if (action==0): 
-                self.reward = -5 # 허공에서 수집 액션한 경우
+                self.reward = self.R_vain # 허공에서 수집 액션한 경우
             else:
-                self.reward = -1 # 이동한 경우
+                self.reward = self.R_step # 이동한 경우
             self.done = False
         elif (inv_after > inv_before): # 아이템 수집 시
             if (inv_after == 3):
                 self.reward = self.reward_check() # 아이템 모두 모은 경우 인벤토리 검사
                 self.done = True
             else: 
-                self.reward = 5 # 아직 아이템을 모두 모으지 못한 경우
+                self.reward = self.R_item # 아직 아이템을 모두 모으지 못한 경우
                 self.done = False
         else: # 버그 색출
             self.close()
@@ -171,9 +178,9 @@ class GCEnv(gym.Env):
         
         # CM를 통해 reward를 주는 방식은 아래 코드를 수정하여 고칠 수 있다.
         if any((CM[0]==1,CM[0]==8,CM[0]==27,CM[0]==6)):
-            reward = 300
+            reward = self.R_rule
         else:
-            reward = 50
+            reward = self.R_full
         
         return reward
         
@@ -612,11 +619,11 @@ class ReplayBuffer:
             lst_R.append([R])
             done_mask = 0.0 if done else 1.0
             lst_done.append([done_mask])
-        bat_S = torch.tensor(lst_S, dtype=torch.float)
-        bat_A = torch.tensor(lst_A)
-        bat_S_next = torch.tensor(lst_S_next, dtype=torch.float)
-        bat_R = torch.tensor(lst_R, dtype=torch.float)
-        bat_done = torch.tensor(lst_done, dtype=torch.float)
+        bat_S = torch.tensor(lst_S, dtype=torch.float, device=device)
+        bat_A = torch.tensor(lst_A, device=device)
+        bat_S_next = torch.tensor(lst_S_next, dtype=torch.float, device=device)
+        bat_R = torch.tensor(lst_R, dtype=torch.float, device=device)
+        bat_done = torch.tensor(lst_done, dtype=torch.float, device=device)
         return bat_S, bat_A, bat_S_next, bat_R, bat_done
     
     def clear(self):
@@ -644,10 +651,11 @@ class Network_Q(nn.Module):
         self.fc3 = nn.Linear(256, action_space)
         
         # Adam 기법으로 최적화
-        self.optimizer = optim.Adam(self.parameters(), lr=alpha)
+        self.optimizer = optim.SGD(self.parameters(), lr=alpha, momentum=0.95, nesterov=True)
     
     def forward(self, S):
         # Input: State, Output: Policy
+        S = S.to(device)
         S = F.relu(self.fc1(S))
         S = F.relu(self.fc2(S))
         Q = self.fc3(S)
@@ -655,9 +663,9 @@ class Network_Q(nn.Module):
 
 
 class Agent_DQN:
-    def __init__(self, env, gamma=0.99, alpha=0.0005, epsilon=1.0, epsilon_decay=0.995, 
-                 buffer_size=20000, batch_size=32, 
-                 episode_limit=2000, step_truncate=1000, step_target_update=1000):
+    def __init__(self, env, gamma=0.99, alpha=0.0003, epsilon=1.0, epsilon_decay=0.998, 
+                 buffer_size=20000, batch_size=64, 
+                 episode_limit=2000, step_truncate=1000, step_target_update=500):
         # 모델명
         self.name = 'DQN'
         
@@ -669,8 +677,8 @@ class Agent_DQN:
         self.A_dim = env.action_space.n
         
         # policy 초기화
-        self.net_q = Network_Q(alpha, self.S_dim, self.A_dim)
-        self.net_q_target = Network_Q(alpha, self.S_dim, self.A_dim)
+        self.net_q = Network_Q(alpha, self.S_dim, self.A_dim).to(device)
+        self.net_q_target = Network_Q(alpha, self.S_dim, self.A_dim).to(device)
         
         # Discount factor
         self.gamma = gamma
@@ -730,13 +738,13 @@ class Agent_DQN:
         
         # Q value
         Q = torch.gather(self.net_q(S), dim=1, index=A)
-        max_Q_next = torch.max(self.net_q_target(S_next), dim=1)[0].unsqueeze(1)
+        max_Q_next = torch.max(self.net_q_target(S_next), dim=1)[0].unsqueeze(1).to(device)
         
         # Target Q
         Q_target = R + D*self.gamma*max_Q_next
         
         # Gradient Descent
-        loss = F.smooth_l1_loss(Q, Q_target)
+        loss = F.smooth_l1_loss(Q, Q_target).to(device)
         self.net_q.optimizer.zero_grad()
         loss.backward()
         self.net_q.optimizer.step()
@@ -824,7 +832,7 @@ class Agent_DQN:
             
             # 에피소드 정보 출력
             if mode_trace:
-                print(f'episode:{episode+1}, score:{G}, step:{step}')
+                print(f'episode:{episode+1}, score:{G:.3f}, step:{step}')
             
             # episode & epsilon update
             episode += 1
@@ -1114,10 +1122,14 @@ def result_record(agent):
 
 #%% Agent 학습
 # 환경 구성
-env = GCEnv(render_mode='human', stage_type=0)
+env = GCEnv(render_mode='agent', stage_type=0)
+
+# GPU 사용
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.backends.cudnn.benchmark = True
 
 # DQN
-agent = Agent_DQN(env=env, step_truncate=500, episode_limit=1000)
+agent = Agent_DQN(env=env, step_truncate=500, episode_limit=2000)
 agent.train(mode_trace=True)
 result_show(agent)
 result_record(agent)
