@@ -34,6 +34,8 @@ class GCEnv(gym.Env):
         self.M_CC = self.content_classifier()
         self.M_IR = self.iteminfo_returner()
         self.M_PR = self.playerpos_returner()
+        
+        
    
     
     def step(self, action):
@@ -67,7 +69,7 @@ class GCEnv(gym.Env):
         # reward and done
         if (inv_after == inv_before): # 아이템 미수집 시
             if (action==0): 
-                self.reward = -3 # 허공에서 수집 액션한 경우
+                self.reward = -5 # 허공에서 수집 액션한 경우
             else:
                 self.reward = -1 # 이동한 경우
             self.done = False
@@ -169,7 +171,7 @@ class GCEnv(gym.Env):
         
         # CM를 통해 reward를 주는 방식은 아래 코드를 수정하여 고칠 수 있다.
         if any((CM[0]==1,CM[0]==8,CM[0]==27,CM[0]==6)):
-            reward = 250
+            reward = 300
         else:
             reward = 50
         
@@ -655,7 +657,7 @@ class Network_Q(nn.Module):
 class Agent_DQN:
     def __init__(self, env, gamma=0.99, alpha=0.0005, epsilon=1.0, epsilon_decay=0.995, 
                  buffer_size=20000, batch_size=32, 
-                 episode_limit=2000, step_truncate=1000, step_target_update=500):
+                 episode_limit=2000, step_truncate=1000, step_target_update=1000):
         # 모델명
         self.name = 'DQN'
         
@@ -1112,10 +1114,10 @@ def result_record(agent):
 
 #%% Agent 학습
 # 환경 구성
-env = GCEnv(render_mode='human', stage_type=1, grid_num=(5,5))
+env = GCEnv(render_mode='human', stage_type=0)
 
 # DQN
-agent = Agent_DQN(env=env, step_truncate=500, episode_limit=500)
+agent = Agent_DQN(env=env, step_truncate=500, episode_limit=1000)
 agent.train(mode_trace=True)
 result_show(agent)
 result_record(agent)
