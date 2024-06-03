@@ -10,7 +10,7 @@ import math
 #%%
 class GCEnv(gym.Env):
     def __init__(self, render_mode=None, stage_type=0, grid_num=(9,7),
-                 reward_set=(500,100,4,5,2)):
+                 reward_set=(500,100,4,5,2), state_type='onehot'):
         ## 화면 출력 여부 설정
         self.render_mode = render_mode
         self.screen = None
@@ -30,12 +30,19 @@ class GCEnv(gym.Env):
         self.action = -1
         
         ## State 크기 정보 (obs와 함께 직접 수정해야 함)
-        self.state_space = (grid_num[0]*grid_num[1]*2 + 9) *2
+        self.state_type = state_type
+        if (state_type == 'onehot'):
+            self.state_space = (2*grid_num[0]*grid_num[1]+6)*2
+        elif (state_type == 'conv'):
+            self.state_space = (grid_num[0]*grid_num[1]+6)*2
+            self.kernel = filter_gauss2d(sigma=0.8)
+        else:
+            raise SystemExit('Please check the state_type')
         
         ## 이전 State
-        self.M_CC = self.content_classifier()
-        self.M_IR = self.iteminfo_returner()
         self.M_PR = self.playerpos_returner()
+        self.M_IR = self.iteminfo_returner()
+        self.M_CC = self.content_classifier()
         
         ## Reward 설정
         self.R_rule = math.log(reward_set[0], 1000) # composition
@@ -57,21 +64,28 @@ class GCEnv(gym.Env):
         inv_after = self.G_player.inventory_num
         
         ## State 구성
-        CC = self.content_classifier()
-        IR = self.iteminfo_returner()
         PR = self.playerpos_returner()
+        IR = self.iteminfo_returner()
+        CC = self.content_classifier()
         
         # State
-        self.observation = lst_flatten(
-            [[self.M_PR, self.M_CC, self.M_IR], [PR, CC, IR]])
+        if (self.state_type == 'onehot'):
+            O = [[self.M_PR, self.M_IR, self.M_CC], [PR, IR, CC]]
+        elif (self.state_type == 'conv'):
+            M_minimap = np.array(self.M_PR) + np.array(self.M_IR)
+            M_minimap = conv2d(M_minimap, self.kernel)
+            minimap = np.array(PR) + np.array(IR)
+            minimap = conv2d(minimap, self.kernel)
+            O = [[M_minimap, self.M_CC], [minimap, CC]]
+        self.observation = lst_flatten(O)
         
         # Step Info
         self.info = {'Eval': 'None'}
         
         # Past State Update
-        self.M_CC = CC.copy()
-        self.M_IR = IR.copy()
         self.M_PR = PR.copy()
+        self.M_IR = IR.copy()
+        self.M_CC = CC.copy()
         
         # reward and done
         if (inv_after == inv_before): # 아이템 미수집 시
@@ -97,6 +111,38 @@ class GCEnv(gym.Env):
         return self.observation, self.reward, self.done, self.info
     
     
+    # 한 에피소드가 끝났을 때
+    def reset(self):
+        # Reset
+        self.G_item = self.ItemCreator(self.stage_type) # 아이템 생성 (나중에 고칠 것)
+        self.G_player.reset()
+        self.render_reset()
+        self.done = False
+
+        # State
+        PR = self.playerpos_returner()
+        IR = self.iteminfo_returner()
+        CC = self.content_classifier()
+        
+        # State
+        if (self.state_type == 'onehot'):
+            O = [[self.M_PR, self.M_IR, self.M_CC], [PR, IR, CC]]
+        elif (self.state_type == 'conv'):
+            M_minimap = np.array(self.M_PR) + np.array(self.M_IR)
+            M_minimap = conv2d(M_minimap, self.kernel)
+            minimap = np.array(PR) + np.array(IR)
+            minimap = conv2d(minimap, self.kernel)
+            O = [[M_minimap, self.M_CC], [minimap, CC]]
+        self.observation = lst_flatten(O)
+        
+        # Past State Update
+        self.M_PR = PR.copy()
+        self.M_IR = IR.copy()
+        self.M_CC = CC.copy()
+        
+        return self.observation
+    
+    
     def content_classifier(self):
         """
         content는 1,2,3의 숫자를 사용하여 특성을 구분짓는다.
@@ -113,15 +159,49 @@ class GCEnv(gym.Env):
         CC의 index는 content의 종류, value는 content의 보유수로 설정하고자 한다.
         """
         inv = self.G_player.inventory
-        CC = [0,0,0,0,0,0,0,0,0]
-        for c in range(3):
-            for i in range(3):
+        CC = [[0,0,0],[0,0,0]]
+        for i in range(3):
+            for c in range(2):
                 CC_idx = inv[i].content[c]
                 if CC_idx != 0:
-                    CC[CC_idx+3*c-1] += 1
+                    CC[c][CC_idx-1] += 1
         return CC
     
-    def content_multiplier(self):
+    
+    def playerpos_returner(self):
+        """
+        플레이어의 위치를 onehot 형식으로 반환해준다.
+        """
+        # 그리드 크기만큼의 PR list 생성
+        PR = [[0 for _ in range(self.grid_num[1])] for _ in range(self.grid_num[0])]
+        
+        # 플레이어가 존재하는 좌표 찾고, PR list에 onehot
+        PR[self.G_player.position[0]][self.G_player.position[1]] = 1
+        
+        return PR
+    
+    
+    def iteminfo_returner(self):
+        """
+        현재 맵에 존재하는 아이템의 정보를 반환해준다.
+        1. gridworld size가 9*7이면, 총 63칸의 list를 만든다.
+        2. 아이템이 (x,y)에 위치하고 content는 (a,b,c)라면, list의 x+y*9번째 칸에 cba(4진법)을 입력한다.
+        예1_ 위치(4,0),content(2,0)[삼각형,색없음]: list[4]=2
+        예2_ 위치(3,2),content(1,3)[원,파랑색]: list[21]=13
+        """
+        # 그리드 크기만큼의 IR list 생성
+        IR = [[0 for _ in range(self.grid_num[1])] for _ in range(self.grid_num[0])]
+        
+        # 아이템이 존재하는 좌표 찾고, IR list에 content 입력
+        for item in self.G_item:
+            if not item.collected:
+                IR[item.position[0]][item.position[1]] = 1
+                #IR[item.position[0]][item.position[1]] = item.content[0]+4*item.content[1]
+            
+        return IR
+
+    
+    def reward_check(self):
         """
         인벤토리에 있는 각 아이템의 content를 곱하면, 아래와 같은 숫자를 반환할 것이다.
         
@@ -132,52 +212,13 @@ class GCEnv(gym.Env):
         여기서 reward를 줘야하는 상황은 바로, 세 아이템 모두 한 dimension에 대하여 
         각각 다른 content를 가지고 있거나, 모두 같은 content를 가지고 있는 상황이다.
         """
-        inv = self.G_player.inventory
-        CM = (inv[0].content[0]*inv[1].content[0]*inv[2].content[0],
-             inv[0].content[1]*inv[1].content[1]*inv[2].content[1],
-             inv[0].content[2]*inv[1].content[2]*inv[2].content[2])
-        return CM
-    
-    
-    def playerpos_returner(self):
-        """
-        플레이어의 위치를 onehot 형식으로 반환해준다.
-        """
-        # 그리드 크기만큼의 PR list 생성
-        PR = [-1 for idx in range(self.grid_num[0]*self.grid_num[1])]
-        
-        # 플레이어가 존재하는 좌표 찾고, PR list에 onehot
-        player_pos = self.G_player.position[1]*self.grid_num[0]+self.G_player.position[0]
-        PR[player_pos] = 1
-        
-        return PR
-    
-    def iteminfo_returner(self):
-        """
-        현재 맵에 존재하는 아이템의 정보를 반환해준다.
-        1. gridworld size가 9*7이면, 총 63칸의 list를 만든다.
-        2. 아이템이 (x,y)에 위치하고 content는 (a,b,c)라면, list의 x+y*9번째 칸에 cba(4진법)을 입력한다.
-        예1_ 위치(4,0),content(2,0,0)[삼각형,색없음]: list[4]=2
-        예2_ 위치(3,2),content(1,3,0)[원,파랑색]: list[21]=13
-        """
-        # 그리드 크기만큼의 IR list 생성
-        IR = [-1 for idx in range(self.grid_num[0]*self.grid_num[1])]
-        
-        # 아이템이 존재하는 좌표 찾고, IR list에 content 입력
-        for item in self.G_item:
-            if not item.collected:
-                item_pos = item.position[1]*self.grid_num[0]+item.position[0]
-                IR[item_pos] = item.content[0]+4*item.content[1]+16*item.content[2]
-            
-        return IR
-
-    
-    def reward_check(self):
         # 인벤토리 내부에는 3개의 아이템 content가 들어있을 것
         if (self.G_player.inventory_num != 3):
             raise SystemExit('Cannot find three items in inventory!')
         
-        CM = self.content_multiplier()
+        inv = self.G_player.inventory
+        CM = (inv[0].content[0]*inv[1].content[0]*inv[2].content[0],
+             inv[0].content[1]*inv[1].content[1]*inv[2].content[1])
         
         # CM를 통해 reward를 주는 방식은 아래 코드를 수정하여 고칠 수 있다.
         if any((CM[0]==1,CM[0]==8,CM[0]==27,CM[0]==6)):
@@ -302,31 +343,6 @@ class GCEnv(gym.Env):
             pg.display.update()
         elif (self.render_mode == "rgb_array"):
             return np.transpose(np.array(pg.surfarray.pixels3d(self.screen)), axes=(1, 0, 2))
-        
-    
-    # 한 에피소드가 끝났을 때
-    def reset(self):
-        # Reset
-        self.G_item = self.ItemCreator(self.stage_type) # 아이템 생성 (나중에 고칠 것)
-        self.G_player.reset()
-        self.render_reset()
-        self.done = False
-
-        # State
-        CC = self.content_classifier()
-        IR = self.iteminfo_returner()
-        PR = self.playerpos_returner()
-        
-        # State
-        self.observation = lst_flatten(
-            [[self.M_PR, self.M_CC, self.M_IR], [PR, CC, IR]])
-        
-        # Past State Update
-        self.M_CC = CC.copy()
-        self.M_IR = IR.copy()
-        self.M_PR = PR.copy()
-        
-        return self.observation
     
     
     # 게임 종료
@@ -337,12 +353,12 @@ class GCEnv(gym.Env):
     ## Game Component
     # 플레이어 (Agent)
     class Player:
-        def __init__(self, environment, position):
-            self.environment = environment # 플레이어가 위치한 환경
+        def __init__(self, env, position):
+            self.env = env # 플레이어가 위치한 환경
             self.position = position # position=(4,6)이라면, 5열 7행에 플레이어 배치
-            self.inventory = [environment.Item(environment),
-                              environment.Item(environment),
-                              environment.Item(environment)]
+            self.inventory = [env.Item(env),
+                              env.Item(env),
+                              env.Item(env)]
             self.inventory_num = 0
             self.spr = None
             self.rect = None # 스프라이트 히트박스
@@ -355,38 +371,34 @@ class GCEnv(gym.Env):
             elif (command == -1): # Null (아무 행동하지 않음)
                 pass
             else: # 혹시나 버그로 인해 command가 이상한 값으로 설정되어 있을 때
-                self.environment.close()
+                self.env.close()
                 raise SystemExit('Cannot find action command')
         
         # 아이템 수집
         def pick(self):
-            environment = self.environment
-            for item in self.environment.G_item:
+            for item in self.env.G_item:
                 # 플레이어와 위치도 겹치고, 아직 수집 되지 않은 아이템인 경우
                 if (item.position == self.position) and not item.collected:
-                    if environment.render_once:
-                        item.rect.topleft = (environment.Inv_SP[0]+self.inventory_num*environment.grid_size, 
-                                             environment.Inv_SP[1]+environment.Inv_height)
+                    if self.env.render_once:
+                        item.rect.topleft = (self.env.Inv_SP[0]+self.inventory_num*self.env.grid_size, 
+                                             self.env.Inv_SP[1]+self.env.Inv_height)
                     item.collected = True
                     self.inventory[self.inventory_num] = item
                     self.inventory_num += 1
         
         # 이동
         def move(self, direction):
-            if (direction == 1) and (self.position[0] < self.environment.grid_num[0]-1): # Right
+            if (direction == 1) and (self.position[0] < self.env.grid_num[0]-1): # Right
                 self.position = (self.position[0]+1, self.position[1])
             elif (direction == 2) and (self.position[1] > 0): # Up
                 self.position = (self.position[0], self.position[1]-1)
             elif (direction == 3) and (self.position[0] > 0): # Left
                 self.position = (self.position[0]-1, self.position[1])
-            elif (direction == 4) and (self.position[1] < self.environment.grid_num[1]-1): # Down
+            elif (direction == 4) and (self.position[1] < self.env.grid_num[1]-1): # Down
                 self.position = (self.position[0], self.position[1]+1)
             
         # 리셋
-        def reset(self, position=None):
-            # 플레이어가 위치한 환경 정의
-            environment = self.environment
-            
+        def reset(self, position=None):         
             # 위치 설정
             if position is None: # 입력 변수가 없다면 현재 자리 그대로
                 pass
@@ -394,9 +406,9 @@ class GCEnv(gym.Env):
                 self.position = position
             
             # 인벤토리 비우기
-            self.inventory = [environment.Item(environment),
-                              environment.Item(environment),
-                              environment.Item(environment)]
+            self.inventory = [self.env.Item(self.env),
+                              self.env.Item(self.env),
+                              self.env.Item(self.env)]
             self.inventory_num = 0
 
 
@@ -408,8 +420,8 @@ class GCEnv(gym.Env):
         color: (0=None) 1=Red, 2=Green, 3=Blue
         texture: (0=None) 1=?, 2=?, 3=?
         """
-        def __init__(self, environment, content=(0,0,0), position=(0,0)):
-            self.environment = environment # 아이템이 위치하는 환경
+        def __init__(self, env, content=(0,0), position=(0,0)):
+            self.env = env # 아이템이 위치하는 환경
             self.position = position # pos=(4,6)이라면, 5열 7행에 아이템 배치
             self.content = content
             self.collected = False # 인벤토리에 수집된 여부
@@ -433,10 +445,10 @@ class GCEnv(gym.Env):
             elif self.content[1]==3:
                 color = (0,0,255)
             else:
-                self.environment.close()
+                self.env.close()
                 raise SystemExit('Cannot find color content')
             # Dimension: 모양 설정
-            grid_size = self.environment.grid_size
+            grid_size = self.env.grid_size
             if self.content[0]==1:
                 pg.draw.circle(self.spr, color, (grid_size//2,grid_size//2), grid_size//2-8)
             elif self.content[0]==2:
@@ -448,14 +460,14 @@ class GCEnv(gym.Env):
     ## 아이템 생성기
     def ItemCreator(self, stage_type):
         if (stage_type==0):
-            ItemSet = [self.Item(self,(1,1,0),(0,0)), 
-                       self.Item(self,(2,2,0),(3,2)), 
-                       self.Item(self,(3,3,0),(4,6)), 
-                       self.Item(self,(2,1,0),(7,1)), 
-                       self.Item(self,(2,3,0),(6,1))]
+            ItemSet = [self.Item(self,(1,1),(0,0)), 
+                       self.Item(self,(2,2),(3,2)), 
+                       self.Item(self,(3,3),(4,6)), 
+                       self.Item(self,(2,1),(7,1)), 
+                       self.Item(self,(2,3),(6,1))]
         elif (stage_type==1):
             position_list = random.sample(range(self.grid_num[0]*self.grid_num[1]),5)
-            content_list = [(1,1,0),(2,2,0),(3,3,0),(2,1,0),(2,3,0)]
+            content_list = [(1,1),(2,2),(3,3),(2,1),(2,3)]
             ItemSet = []
             for idx in range(5):
                 pos = (position_list[idx]%self.grid_num[0], position_list[idx]//self.grid_num[0])
@@ -509,6 +521,34 @@ def check_dir(path):
         print('Error: Failed to create the directory.')
 
 
+# 가우시안 필터 (블러)
+# 주의 : transposed output이 나온다.
+def filter_gauss2d(size=(3,3), sigma=1):
+    size = np.array(size)
+    kernel = np.zeros(size)
+    center = np.floor(size/2).astype(int)
+    for x in range(size[0]):
+        for y in range(size[1]):
+            target = np.array([x,y])
+            kernel[x,y] = np.exp(-np.sum((center-target)**2)/(2*(sigma**2)))/(2*np.pi*(sigma**2))
+    return kernel
+
+
+# 컨볼루션
+# 주의 1 : transposed input을 입력해야 한다.
+# 주의 2 : transposed output이 나온다.
+def conv2d(image, kernel, padding=1):
+    K_wh = np.array(kernel.shape) # kernel width, height
+    image = np.pad(image, ((padding,padding),(padding,padding)), 'constant', constant_values=0)
+    I_wh = np.array(image.shape) # padded image width, height
+    feature = np.zeros((I_wh-K_wh+1))
+    for x in range(I_wh[0]-K_wh[0]+1):
+        for y in range(I_wh[1]-K_wh[1]+1):
+            feature[x,y] = np.sum(image[x:x+K_wh[0],y:y+K_wh[1]]*kernel)
+    feature = feature.tolist()
+    return feature
+    
+    
 #%% Main
 
 # 파일 경로 설정
@@ -629,7 +669,7 @@ class ReplayBuffer:
     
     def append(self, transition):
         self.buffer.append(transition)
-
+    
 
 #%% DQN
 #class Network_
@@ -1096,10 +1136,10 @@ def result_show(agent):
         if (epi_type == epi_end[idx]):
             pass
         else:
-            epi_interval[epi_type][-1].append(idx)
+            epi_interval[epi_type][-1].append(idx-1)
             epi_type = epi_end[idx]
             epi_interval[epi_type].append([idx])
-    epi_interval[epi_type][-1].append(len(epi_end))
+    epi_interval[epi_type][-1].append(len(epi_end)-1)
     
     for X in epi_interval[0]:
         itv_0 = ax.fill_between(X, Y_top, Y_bottom, color='blue', alpha=0.5)
@@ -1162,22 +1202,46 @@ def result_record(agent):
     np.savetxt(f'{path}/[S{agent.env.stage_type}]Summary.txt', data, fmt=('%4d','%4d','%4.2f'))
 
 
-#%% Agent 학습
-# 환경 구성
-env = GCEnv(render_mode='human', stage_type=1, grid_num=(9,7))
+#%% Play 함수
 
-# 가능하면 GPU 사용
-DV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def play_human(env_render='human', env_stage=0, env_grid=(9,7),
+               play_type='save'):
+    global env
+    pass
 
-# DQN
-agent = Agent_DQN(env=env, step_truncate=500, episode_limit=5000)
+def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='onehot',
+               model_name='DQN', model_ST=500, model_EL=1000, model_ED=0.998,
+               play_type='save'):
+    global DV
+    global env
+    global agent
+    
+    # 가능하면 GPU 사용
+    DV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # 환경 구성
+    env = GCEnv(render_mode=env_render, stage_type=env_stage, grid_num=env_grid, state_type=env_state)
+    
+    # DQN
+    if (model_name=='DQN'):
+        agent = Agent_DQN(env=env, step_truncate=model_ST, episode_limit=model_EL, epsilon_decay=model_ED)
+        # model load
+        if (play_type=='load'):
+            agent.net_q = torch.load(f'./Model/DQN/[S{env_stage}]net_Q(all).pt')
+            agent.net_q_target = torch.load(f'./Model/DQN/[S{env_stage}]net_Q(all).pt')
+    
+    # 모델 학습
+    agent.train(mode_trace=True)
+    result_show(agent)
+    result_record(agent)
+    
+    if (play_type=='save'):
+        # 모델 저장
+        agent.model_save()
+    
 
-# # model load
-# agent.net_q = torch.load('./Model/DQN/[S1]net_Q(all).pt')
-# agent.net_q_target = torch.load('./Model/DQN/[S1]net_Q(all).pt')
+#%% 플레이
 
-# 학습 및 저장
-agent.train(mode_trace=True)
-result_show(agent)
-result_record(agent)
-agent.model_save()
+play_agent(env_render='agent', env_stage=1, env_grid=(9,7), env_state='conv',
+           model_name='DQN', model_ST=500, model_EL=10000, model_ED=0.9995,
+           play_type='save')
