@@ -1,16 +1,51 @@
-#%% python 3.9
+#%% Info
+# version : python 3.9
+import os
+
 import gym
 from gym import spaces
 import pygame as pg
-import os
+
+import matplotlib.pyplot as plt
 import numpy as np
 import random
-import math
+from collections import deque
+from PIL import Image
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+import torchvision.transforms as T
+
 
 #%%
 class GCEnv(gym.Env):
     def __init__(self, render_mode=None, stage_type=0, grid_num=(9,7),
-                 reward_set=(500,100,4,5,2), state_type='onehot'):
+                 reward_set=(3.,2.,1.,-0.01,-0.02), state_type='onehot'):
+        """
+        render_mode
+        - human : full play screen
+        - agent : No screen
+        
+        stage_type
+        - 0 : fixed position 5 items.
+        - 1 : random position 5 items.
+        
+        reward_set
+        [0] : rule
+        [1] : full
+        [2] : item
+        [3] : step
+        [4] : vain
+        
+        state_type
+        - onehot
+        - semiconv
+        - semiconv_ego
+        - conv
+        """
+        
         ## 화면 출력 여부 설정
         self.render_mode = render_mode
         self.screen = None
@@ -25,6 +60,9 @@ class GCEnv(gym.Env):
         self.G_player = self.Player(self, (self.grid_num[0]//2,self.grid_num[1]//2)) # Player
         self.G_item = self.ItemCreator(self.stage_type) # Item
         
+        # 렌더 활성화
+        self.render_initialize()
+        
         ## Action 유형 선언
         self.action_space = spaces.Discrete(5) # 0:pick, (1,2,3,4):move
         self.action = -1
@@ -33,25 +71,34 @@ class GCEnv(gym.Env):
         self.state_type = state_type
         if (state_type == 'onehot'):
             self.state_space = (2*grid_num[0]*grid_num[1]+6)*2
-        elif (state_type == 'conv'):
+        elif (state_type == 'semiconv'):
             self.state_space = (grid_num[0]*grid_num[1]+6)*2
-            self.kernel = filter_gauss2d(sigma=0.8)
+            self.kernel = filter_gauss2d(sigma=1)
+        elif (state_type == 'semiconv_ego'):
+            self.player_sight = 2
+            self.state_space = 6+(2*self.player_sight+1)**2
+            self.kernel = filter_gauss2d(sigma=1)
+        elif (state_type == 'conv'):
+            self.state_space = 40
+            self.resizer = T.Compose(
+                [T.ToPILImage(), T.Resize((self.state_space,self.state_space), interpolation=Image.BICUBIC), T.ToTensor()])
         else:
             raise SystemExit('Please check the state_type')
         
         ## 이전 State
-        self.M_PR = self.playerpos_returner()
-        self.M_IR = self.iteminfo_returner()
-        self.M_CC = self.content_classifier()
+        self.M_PR = self.FS_playerpos_returner()
+        self.M_IR = self.FS_iteminfo_returner()
+        self.M_CC = self.FS_content_classifier()
         
         ## Reward 설정
-        self.R_rule = math.log(reward_set[0], 1000) # composition
-        self.R_full = math.log(reward_set[1], 1000) # just make 3 item
-        self.R_item = math.log(reward_set[2], 1000) # take 1 item
-        self.R_step = -math.log(reward_set[3], 1000) # take 1 step
-        self.R_vain = -math.log(reward_set[4], 1000) # wrong forage
-
+        self.R_rule = reward_set[0] # composition
+        self.R_full = reward_set[1] # just make 3 item
+        self.R_item = reward_set[2] # take 1 item
+        self.R_step = reward_set[3] # take 1 step
+        self.R_vain = reward_set[4] # wrong forage
     
+    
+    ## step
     def step(self, action):
         # 액션 이전, 플레이어 인벤토리 정보
         inv_before = self.G_player.inventory_num
@@ -63,29 +110,11 @@ class GCEnv(gym.Env):
         # 액션 이후, 플레이어 인벤토리 정보
         inv_after = self.G_player.inventory_num
         
-        ## State 구성
-        PR = self.playerpos_returner()
-        IR = self.iteminfo_returner()
-        CC = self.content_classifier()
-        
-        # State
-        if (self.state_type == 'onehot'):
-            O = [[self.M_PR, self.M_IR, self.M_CC], [PR, IR, CC]]
-        elif (self.state_type == 'conv'):
-            M_minimap = np.array(self.M_PR) + np.array(self.M_IR)
-            M_minimap = conv2d(M_minimap, self.kernel)
-            minimap = np.array(PR) + np.array(IR)
-            minimap = conv2d(minimap, self.kernel)
-            O = [[M_minimap, self.M_CC], [minimap, CC]]
-        self.observation = lst_flatten(O)
+        # State 구성
+        self.observation = self.FS_observe(output_type='flatten')
         
         # Step Info
         self.info = {'Eval': 'None'}
-        
-        # Past State Update
-        self.M_PR = PR.copy()
-        self.M_IR = IR.copy()
-        self.M_CC = CC.copy()
         
         # reward and done
         if (inv_after == inv_before): # 아이템 미수집 시
@@ -111,39 +140,99 @@ class GCEnv(gym.Env):
         return self.observation, self.reward, self.done, self.info
     
     
-    # 한 에피소드가 끝났을 때
+    ## 한 에피소드가 끝났을 때
     def reset(self):
         # Reset
         self.G_item = self.ItemCreator(self.stage_type) # 아이템 생성 (나중에 고칠 것)
         self.G_player.reset()
         self.render_reset()
         self.done = False
-
+        
         # State
-        PR = self.playerpos_returner()
-        IR = self.iteminfo_returner()
-        CC = self.content_classifier()
+        self.observation = self.FS_observe(output_type='flatten')
+        
+        return self.observation
+    
+    
+    ## (Function of State) State와 관련된 함수
+    # Observation 구성
+    def FS_observe(self, output_type='flatten'):
+        # Current State
+        PR = self.FS_playerpos_returner()
+        IR = self.FS_iteminfo_returner()
+        CC = self.FS_content_classifier()
         
         # State
         if (self.state_type == 'onehot'):
             O = [[self.M_PR, self.M_IR, self.M_CC], [PR, IR, CC]]
-        elif (self.state_type == 'conv'):
+        elif (self.state_type == 'semiconv'):
             M_minimap = np.array(self.M_PR) + np.array(self.M_IR)
-            M_minimap = conv2d(M_minimap, self.kernel)
+            M_minimap = conv2d(M_minimap, self.kernel, scaling=10)
             minimap = np.array(PR) + np.array(IR)
-            minimap = conv2d(minimap, self.kernel)
+            minimap = conv2d(minimap, self.kernel, scaling=10)
             O = [[M_minimap, self.M_CC], [minimap, CC]]
-        self.observation = lst_flatten(O)
+        elif (self.state_type == 'semiconv_ego'):
+            ps = self.player_sight
+            pp = self.G_player.position
+            minimap = conv2d(np.array(IR), self.kernel, scaling=10)
+            minimap = np.pad(minimap, ((ps,ps),(ps,ps)), 'constant', constant_values=0)
+            PS = minimap[pp[0]:pp[0]+2*ps+1, pp[1]:pp[1]+2*ps+1].tolist()
+            O = [PS, CC]
+        elif (self.state_type == 'conv'):
+            image = np.transpose(np.array(pg.surfarray.pixels3d(self.screen)), axes=(2, 1, 0))
+            O = self.render_crop(image=image)
+            return O
+        else: # 버그 예외 처리
+            raise SystemExit('Please check the state_type. It seems None')
         
         # Past State Update
         self.M_PR = PR.copy()
         self.M_IR = IR.copy()
         self.M_CC = CC.copy()
         
-        return self.observation
+        # Output Type
+        if (output_type == 'flatten'):
+            O = lst_flatten(O)
+        else: # 버그 방지
+            raise SystemExit('Please check the output_type.')
+        
+        return O
     
+    # 플레이어 위치 반환
+    def FS_playerpos_returner(self):
+        """
+        플레이어의 위치를 onehot 형식으로 반환해준다.
+        """
+        # 그리드 크기만큼의 PR list 생성
+        PR = [[0 for _ in range(self.grid_num[1])] for _ in range(self.grid_num[0])]
+        
+        # 플레이어가 존재하는 좌표 찾고, PR list에 onehot
+        PR[self.G_player.position[0]][self.G_player.position[1]] = 1
+        
+        return PR
     
-    def content_classifier(self):
+    # 아이템 맵 반환
+    def FS_iteminfo_returner(self):
+        """
+        현재 맵에 존재하는 아이템의 정보를 반환해준다.
+        1. gridworld size가 9*7이면, 총 63칸의 list를 만든다.
+        2. 아이템이 (x,y)에 위치하고 content는 (a,b,c)라면, list의 x+y*9번째 칸에 cba(4진법)을 입력한다.
+        예1_ 위치(4,0),content(2,0)[삼각형,색없음]: list[4]=2
+        예2_ 위치(3,2),content(1,3)[원,파랑색]: list[21]=13
+        """
+        # 그리드 크기만큼의 IR list 생성
+        IR = [[0 for _ in range(self.grid_num[1])] for _ in range(self.grid_num[0])]
+        
+        # 아이템이 존재하는 좌표 찾고, IR list에 content 입력
+        for item in self.G_item:
+            if not item.collected:
+                IR[item.position[0]][item.position[1]] = 1
+                #IR[item.position[0]][item.position[1]] = item.content[0]+4*item.content[1]
+            
+        return IR
+    
+    # 인벤토리 정보 반환
+    def FS_content_classifier(self):
         """
         content는 1,2,3의 숫자를 사용하여 특성을 구분짓는다.
         다만 이 방식은 딥러닝의 input으로 쓰는데 문제가 있다.
@@ -168,39 +257,7 @@ class GCEnv(gym.Env):
         return CC
     
     
-    def playerpos_returner(self):
-        """
-        플레이어의 위치를 onehot 형식으로 반환해준다.
-        """
-        # 그리드 크기만큼의 PR list 생성
-        PR = [[0 for _ in range(self.grid_num[1])] for _ in range(self.grid_num[0])]
-        
-        # 플레이어가 존재하는 좌표 찾고, PR list에 onehot
-        PR[self.G_player.position[0]][self.G_player.position[1]] = 1
-        
-        return PR
-    
-    
-    def iteminfo_returner(self):
-        """
-        현재 맵에 존재하는 아이템의 정보를 반환해준다.
-        1. gridworld size가 9*7이면, 총 63칸의 list를 만든다.
-        2. 아이템이 (x,y)에 위치하고 content는 (a,b,c)라면, list의 x+y*9번째 칸에 cba(4진법)을 입력한다.
-        예1_ 위치(4,0),content(2,0)[삼각형,색없음]: list[4]=2
-        예2_ 위치(3,2),content(1,3)[원,파랑색]: list[21]=13
-        """
-        # 그리드 크기만큼의 IR list 생성
-        IR = [[0 for _ in range(self.grid_num[1])] for _ in range(self.grid_num[0])]
-        
-        # 아이템이 존재하는 좌표 찾고, IR list에 content 입력
-        for item in self.G_item:
-            if not item.collected:
-                IR[item.position[0]][item.position[1]] = 1
-                #IR[item.position[0]][item.position[1]] = item.content[0]+4*item.content[1]
-            
-        return IR
-
-    
+    ## 인벤토리 체크
     def reward_check(self):
         """
         인벤토리에 있는 각 아이템의 content를 곱하면, 아래와 같은 숫자를 반환할 것이다.
@@ -229,9 +286,31 @@ class GCEnv(gym.Env):
             self.info['Eval'] = 'full'
         
     
+    ## 렌더 함수
+    # 렌더 초기화
     def render_initialize(self):
-        # 처음 렌더
+        # 렌더 모드 체크
+        if (self.render_mode == 'agent'): # Agent 모드
+            return
+        elif (self.render_mode == 'human'): # human 모드
+            pass
+        else: # 렌더 모드가 부적절한 경우
+            raise SystemExit('You have to specify the render_mode. etc: human')
+        
+        # 첫 렌더 여부
         self.render_once = True
+        
+        ## 렌더에 필요한 요소 준비
+        # 화면에 창 띄우기
+        pg.init()
+        pg.display.set_caption('Hello!') # Title
+        
+        # 해상도 설정
+        self.G_resolution = (1280,720)
+        self.screen = pg.display.set_mode(self.G_resolution) # Display Setting
+
+        # clock 생성
+        self.G_clock = pg.time.Clock()
         
         # 그리드 설정
         self.grid_size = 64
@@ -259,54 +338,35 @@ class GCEnv(gym.Env):
                                                (self.grid_size,self.grid_size)) # 그리드 1칸 크기만큼 캐릭터 사이즈 조절
         self.G_player.rect = self.G_player.spr.get_rect() # 스프라이트 히트박스
         
-        # 렌더 리셋
-        self.render_reset() 
-
-    
-    def render_reset(self):
-        if self.render_once:
-            # 플레이어 위치 리셋
-            self.G_player.rect.topleft = (self.grid_SP[0]+self.G_player.position[0]*self.grid_size, 
-                                          self.grid_SP[1]+self.G_player.position[1]*self.grid_size)     
-            # 아이템 리셋
-            """
-            렌더 이전에 수집된 아이템은 위치를 잘 반영하지 못하는 버그 존재
-            """
-            for item in self.G_item:
-                item.spr = pg.Surface((self.grid_size,self.grid_size), pg.SRCALPHA)
-                item.rect = item.spr.get_rect()
-                item.rect.topleft = (self.grid_SP[0]+item.position[0]*self.grid_size, 
-                                     self.grid_SP[1]+item.position[1]*self.grid_size)
-                item.draw()
+        ## 렌더 리셋
+        self.render_reset()
         
-    
-    def render(self):
-        # 렌더 모드를 설정하지 않은 경우
-        if self.render_mode is None:
-            gym.logger.warn("You have to specify the render_mode. etc: human")
+        # 배경 그리기
+        self.screen.blit(self.G_background, self.G_background.get_rect())
+        
+
+    # 렌더 리셋
+    def render_reset(self):
+        # 렌더가 안되었다면 reset 취소
+        if not self.render_once:
             return
         
+        # 플레이어 위치 리셋
+        self.G_player.rect.topleft = (self.grid_SP[0]+self.G_player.position[0]*self.grid_size, 
+                                      self.grid_SP[1]+self.G_player.position[1]*self.grid_size)
+        # 아이템 리셋
+        for item in self.G_item:
+            item.spr = pg.Surface((self.grid_size,self.grid_size), pg.SRCALPHA)
+            item.rect = item.spr.get_rect()
+            item.rect.topleft = (self.grid_SP[0]+item.position[0]*self.grid_size, 
+                                 self.grid_SP[1]+item.position[1]*self.grid_size)
+            item.draw()
+        
+    # 렌더
+    def render(self):
         # 렌더 모드가 agent인 경우
         if (self.render_mode == 'agent'):
             return
-        
-        # 화면에 띄운 창이 없는 경우
-        if self.screen is None:
-            pg.init() # 창 띄우기
-            pg.display.set_caption('Hello!') # Title
-            # 해상도 설정
-            self.G_resolution = (1280,720)
-            if (self.render_mode == "human"):
-                self.screen = pg.display.set_mode(self.G_resolution) # Display Setting
-            else:  # mode == "rgb_array"
-                self.screen = pg.Surface(self.G_resolution)
-            self.render_initialize() # 렌더 초기화 (창 켜질 때 한번만 구동) (스테이지 바뀌어서 맵크기 변하면 코드 수정해야함)
-            # 배경 그리기
-            self.screen.blit(self.G_background, self.G_background.get_rect())
-        
-        # clock이 없는 경우
-        if self.G_clock is None:
-            self.G_clock = pg.time.Clock() # Time
         
         ### Draw in Display
         ## 그리드 그리기
@@ -338,14 +398,23 @@ class GCEnv(gym.Env):
                                       self.grid_SP[1]+self.G_player.position[1]*self.grid_size)
         self.screen.blit(self.G_player.spr, self.G_player.rect)
         
-        if (self.render_mode == "human"):
+        # 화면 업데이트
+        if (self.render_mode == 'human'):
             self.G_clock.tick(G_FPS)
             pg.display.update()
-        elif (self.render_mode == "rgb_array"):
-            return np.transpose(np.array(pg.surfarray.pixels3d(self.screen)), axes=(1, 0, 2))
+    
+    # 화면 크롭
+    def render_crop(self, image):
+        ## image(channel, height, width)
+        # Grid만 crop
+        img_grid = image[:, self.grid_SP[1]:self.grid_EP[1], self.grid_SP[0]:self.grid_EP[0]]
+        img_grid = np.ascontiguousarray(img_grid, dtype=np.float32) / 255
+        img_grid = torch.from_numpy(img_grid)
+        
+        return self.resizer(img_grid).unsqueeze(0).to(DV)
     
     
-    # 게임 종료
+    ## 게임 종료
     def close(self):
         pg.quit()
     
@@ -537,17 +606,17 @@ def filter_gauss2d(size=(3,3), sigma=1):
 # 컨볼루션
 # 주의 1 : transposed input을 입력해야 한다.
 # 주의 2 : transposed output이 나온다.
-def conv2d(image, kernel, padding=1):
+def conv2d(image, kernel, padding=1, scaling=1):
     K_wh = np.array(kernel.shape) # kernel width, height
     image = np.pad(image, ((padding,padding),(padding,padding)), 'constant', constant_values=0)
     I_wh = np.array(image.shape) # padded image width, height
     feature = np.zeros((I_wh-K_wh+1))
     for x in range(I_wh[0]-K_wh[0]+1):
         for y in range(I_wh[1]-K_wh[1]+1):
-            feature[x,y] = np.sum(image[x:x+K_wh[0],y:y+K_wh[1]]*kernel)
+            feature[x,y] = scaling * np.sum(image[x:x+K_wh[0],y:y+K_wh[1]]*kernel)
     feature = feature.tolist()
     return feature
-    
+
     
 #%% Main
 
@@ -619,13 +688,6 @@ C_lightgreen = (170,240,180)
 
 
 #%% 모델링
-from collections import deque
-import matplotlib.pyplot as plt
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
-
 
 class ReplayBuffer:
     def __init__(self, buffer_size):
@@ -683,9 +745,9 @@ class Network_Q(nn.Module):
         super().__init__()
         
         # 레이어 설정
-        self.fc1 = nn.Linear(state_space, 256)
-        self.fc2 = nn.Linear(256, 256)
-        self.fc3 = nn.Linear(256, action_space)
+        self.fc1 = nn.Linear(state_space, 392)
+        self.fc2 = nn.Linear(392, 392)
+        self.fc3 = nn.Linear(392, action_space)
         
         # Adam 기법으로 최적화
         self.optimizer = optim.Adam(self.parameters(), lr=alpha)
@@ -699,9 +761,44 @@ class Network_Q(nn.Module):
         return Q
 
 
+class Network_Q_conv(nn.Module):
+    """
+    state_space엔 정사각 image의 한 변의 길이가 들어가야 한다.
+    """
+    def __init__(self, alpha, state_space, action_space):
+        # 상위 클래스인 nn.Module의 __init__ 호출 (self.parameters를 사용하기 위함)
+        super().__init__()
+        
+        # state_space (정사각 image의 한 변의 길이의 제곱)
+        self.state_space = state_space**2
+        
+        # 레이어 설정
+        self.conv1 = nn.Conv2d(3, 8, kernel_size=5, stride=1, padding=2)
+        self.conv2 = nn.Conv2d(8, 16, kernel_size=3, stride=1, padding=1)
+        self.fc1 = nn.Linear(self.state_space, 256)
+        self.fc2 = nn.Linear(256, action_space)
+        
+        # Adam 기법으로 최적화
+        self.optimizer = optim.Adam(self.parameters(), lr=alpha)
+    
+    def forward(self, S):
+        # Input: State, Output: Policy
+        S = S.to(DV)
+        
+        S = F.relu(self.conv1(S))
+        S = F.max_pool2d(S, kernel_size=2, stride=2)
+        S = F.relu(self.conv2(S))
+        S = F.max_pool2d(S, kernel_size=2, stride=2)
+        
+        S = S.view(-1, self.state_space)
+        S = F.relu(self.fc1(S))
+        Q = self.fc2(S)
+        return Q
+        
+
 class Agent_DQN:
     def __init__(self, env, gamma=0.99, alpha=0.0003, epsilon=1.0, epsilon_decay=0.998, 
-                 buffer_size=20000, batch_size=64, 
+                 buffer_size=20000, batch_size=64,
                  episode_limit=2000, step_truncate=1000, step_target_update=500):
         # 모델명
         self.name = 'DQN'
@@ -713,9 +810,19 @@ class Agent_DQN:
         self.S_dim = env.state_space
         self.A_dim = env.action_space.n
         
+        # env의 state가 image일 때 CNN 사용
+        if (env.state_type == 'conv'):
+            self.use_cnn = True
+        else:
+            self.use_cnn = False
+        
         # policy 초기화
-        self.net_q = Network_Q(alpha, self.S_dim, self.A_dim).to(DV)
-        self.net_q_target = Network_Q(alpha, self.S_dim, self.A_dim).to(DV)
+        if self.use_cnn:
+            self.net_q = Network_Q_conv(alpha, self.S_dim, self.A_dim).to(DV)
+            self.net_q_target = Network_Q_conv(alpha, self.S_dim, self.A_dim).to(DV)
+        else:
+            self.net_q = Network_Q(alpha, self.S_dim, self.A_dim).to(DV)
+            self.net_q_target = Network_Q(alpha, self.S_dim, self.A_dim).to(DV)
         
         # Discount factor
         self.gamma = gamma
@@ -743,8 +850,9 @@ class Agent_DQN:
     def model_save(self):
         path = f'./Model/{self.name}'
         check_dir(path)
-        torch.save(self.net_q.state_dict(), f'{path}/[S{self.env.stage_type}]net_Q(param).pt')
-        torch.save(self.net_q, f'{path}/[S{self.env.stage_type}]net_Q(all).pt')
+        model_type = f'[S{self.env.stage_type}][{self.env.state_type}]'
+        torch.save(self.net_q.state_dict(), f'{path}/{model_type}net_Q(param).pt')
+        torch.save(self.net_q, f'{path}/{model_type}net_Q(all).pt')
         
         
     # state가 주어졌을 때 action을 선택하는 방식
@@ -754,7 +862,10 @@ class Agent_DQN:
         if random.random() <= self.epsilon: # 탐색
             return random.randint(0, self.A_dim-1)
         else:
-            A = self.net_q.forward(torch.tensor(S, dtype=torch.float))
+            if self.use_cnn:
+                A = self.net_q.forward(S)
+            else:
+                A = self.net_q.forward(torch.tensor(S, dtype=torch.float))
             return A.argmax().item()
     
     
@@ -827,6 +938,10 @@ class Agent_DQN:
             
             # episode가 끝나거나, step limit에 도달하기 전까지 loop
             while step < self.step_truncate:
+                # 렌더링
+                self.env.render()
+                
+                # Experience
                 A = self.epsilon_greedy(S)
                 S_next, R, done, _ = env.step(A)
                 
@@ -837,9 +952,6 @@ class Agent_DQN:
                 # return(한 에피소드 내 모든 보상, 따라서 gamma decay 안함)과 state update
                 G += R
                 S = S_next
-                
-                # 렌더링
-                self.env.render()
                 
                 # 실시간으로 진행 중인 global step 출력
                 if mode_trace:
@@ -1221,14 +1333,15 @@ def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='oneho
     
     # 환경 구성
     env = GCEnv(render_mode=env_render, stage_type=env_stage, grid_num=env_grid, state_type=env_state)
-    
+
     # DQN
     if (model_name=='DQN'):
         agent = Agent_DQN(env=env, step_truncate=model_ST, episode_limit=model_EL, epsilon_decay=model_ED)
         # model load
         if (play_type=='load'):
-            agent.net_q = torch.load(f'./Model/DQN/[S{env_stage}]net_Q(all).pt')
-            agent.net_q_target = torch.load(f'./Model/DQN/[S{env_stage}]net_Q(all).pt')
+            model_type = f'[S{env_stage}][{env_state}]'
+            agent.net_q = torch.load(f'./Model/DQN/{model_type}net_Q(all).pt')
+            agent.net_q_target = torch.load(f'./Model/DQN/{model_type}net_Q(all).pt')
     
     # 모델 학습
     agent.train(mode_trace=True)
@@ -1242,6 +1355,6 @@ def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='oneho
 
 #%% 플레이
 
-play_agent(env_render='agent', env_stage=1, env_grid=(9,7), env_state='conv',
-           model_name='DQN', model_ST=500, model_EL=10000, model_ED=0.9995,
+play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='semiconv_ego',
+           model_name='DQN', model_ST=500, model_EL=1000, model_ED=0.99,
            play_type='save')
