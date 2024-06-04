@@ -167,9 +167,9 @@ class GCEnv(gym.Env):
             O = [[self.M_PR, self.M_IR, self.M_CC], [PR, IR, CC]]
         elif (self.state_type == 'semiconv'):
             M_minimap = np.array(self.M_PR) + np.array(self.M_IR)
-            M_minimap = conv2d(M_minimap, self.kernel, scaling=10)
+            M_minimap = conv2d(M_minimap, self.kernel, scaling=5)
             minimap = np.array(PR) + np.array(IR)
-            minimap = conv2d(minimap, self.kernel, scaling=10)
+            minimap = conv2d(minimap, self.kernel, scaling=5)
             O = [[M_minimap, self.M_CC], [minimap, CC]]
         elif (self.state_type == 'semiconv_ego'):
             ps = self.player_sight
@@ -745,9 +745,9 @@ class Network_Q(nn.Module):
         super().__init__()
         
         # 레이어 설정
-        self.fc1 = nn.Linear(state_space, 392)
-        self.fc2 = nn.Linear(392, 392)
-        self.fc3 = nn.Linear(392, action_space)
+        self.fc1 = nn.Linear(state_space, 256)
+        self.fc2 = nn.Linear(256, 256)
+        self.fc3 = nn.Linear(256, action_space)
         
         # Adam 기법으로 최적화
         self.optimizer = optim.Adam(self.parameters(), lr=alpha)
@@ -797,7 +797,7 @@ class Network_Q_conv(nn.Module):
         
 
 class Agent_DQN:
-    def __init__(self, env, gamma=0.99, alpha=0.0003, epsilon=1.0, epsilon_decay=0.998, 
+    def __init__(self, env, gamma=0.99, alpha=0.0005, epsilon=1.0, epsilon_decay=0.998, 
                  buffer_size=20000, batch_size=64,
                  episode_limit=2000, step_truncate=1000, step_target_update=500):
         # 모델명
@@ -1355,6 +1355,6 @@ def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='oneho
 
 #%% 플레이
 
-play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='semiconv_ego',
-           model_name='DQN', model_ST=500, model_EL=1000, model_ED=0.99,
+play_agent(env_render='agent', env_stage=1, env_grid=(9,7), env_state='semiconv_ego',
+           model_name='DQN', model_ST=500, model_EL=8000, model_ED=0.9997,
            play_type='save')
