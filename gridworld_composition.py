@@ -1,6 +1,7 @@
 #%% Info
 # version : python 3.9
 import os
+from pynput import keyboard
 
 import gym
 from gym import spaces
@@ -10,13 +11,26 @@ import matplotlib.pyplot as plt
 import numpy as np
 import random
 from collections import deque
-from PIL import Image
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import torchvision.transforms as T
+
+
+#%% Main
+
+# 파일 경로 설정
+dir_main = os.path.split(os.path.abspath(__file__))[0]
+
+# 게임 상수 설정
+G_FPS = 100
+C_white = (255,255,255)
+C_black = (0,0,0)
+C_border = (96,96,96)
+C_inside = (192,192,192)
+C_lightgreen = (170,240,180)
 
 
 #%%
@@ -81,14 +95,14 @@ class GCEnv(gym.Env):
         elif (state_type == 'conv'):
             self.state_space = 40
             self.resizer = T.Compose(
-                [T.ToPILImage(), T.Resize((self.state_space,self.state_space), interpolation=Image.BICUBIC), T.ToTensor()])
+                [T.Resize((self.state_space,self.state_space)), T.Normalize(0,255)])
         else:
             raise SystemExit('Please check the state_type')
         
         ## 이전 State
-        self.M_PR = self.FS_playerpos_returner()
-        self.M_IR = self.FS_iteminfo_returner()
-        self.M_CC = self.FS_content_classifier()
+        self.M_map_player = self.FS_map_player()
+        self.M_map_item = self.FS_map_item()
+        self.M_inv_info = self.FS_inv_info()
         
         ## Reward 설정
         self.R_rule = reward_set[0] # composition
@@ -158,81 +172,82 @@ class GCEnv(gym.Env):
     # Observation 구성
     def FS_observe(self, output_type='flatten'):
         # Current State
-        PR = self.FS_playerpos_returner()
-        IR = self.FS_iteminfo_returner()
-        CC = self.FS_content_classifier()
+        map_player = self.FS_map_player()
+        map_item = self.FS_map_item()
+        inv_info = self.FS_inv_info()
         
         # State
         if (self.state_type == 'onehot'):
-            O = [[self.M_PR, self.M_IR, self.M_CC], [PR, IR, CC]]
+            O = [[self.M_map_player, self.M_map_item, self.M_inv_info],
+                 [map_player, map_item, inv_info]]
         elif (self.state_type == 'semiconv'):
-            M_minimap = np.array(self.M_PR) + np.array(self.M_IR)
-            M_minimap = conv2d(M_minimap, self.kernel, scaling=5)
-            minimap = np.array(PR) + np.array(IR)
-            minimap = conv2d(minimap, self.kernel, scaling=5)
-            O = [[M_minimap, self.M_CC], [minimap, CC]]
+            M_minimap = self.M_map_player + self.M_map_item
+            M_minimap = conv2d(M_minimap, self.kernel, scaling=10)
+            minimap = map_player + map_item
+            minimap = conv2d(minimap, self.kernel, scaling=10)
+            O = [[M_minimap, self.M_inv_info], [minimap, inv_info]]
         elif (self.state_type == 'semiconv_ego'):
             ps = self.player_sight
             pp = self.G_player.position
-            minimap = conv2d(np.array(IR), self.kernel, scaling=10)
-            minimap = np.pad(minimap, ((ps,ps),(ps,ps)), 'constant', constant_values=0)
-            PS = minimap[pp[0]:pp[0]+2*ps+1, pp[1]:pp[1]+2*ps+1].tolist()
-            O = [PS, CC]
+            minimap = conv2d(map_item, self.kernel, scaling=10)
+            minimap = np.pad(minimap, ((ps,)*2,)*2, 'constant', constant_values=0)
+            map_sight = minimap[pp[0]:pp[0]+2*ps+1, pp[1]:pp[1]+2*ps+1]
+            O = [map_sight, inv_info]
         elif (self.state_type == 'conv'):
-            image = np.transpose(np.array(pg.surfarray.pixels3d(self.screen)), axes=(2, 1, 0))
+            image = np.transpose(pg.surfarray.pixels3d(self.screen), axes=(1,0,2)) # H, W, C
             O = self.render_crop(image=image)
             return O
         else: # 버그 예외 처리
             raise SystemExit('Please check the state_type. It seems None')
         
         # Past State Update
-        self.M_PR = PR.copy()
-        self.M_IR = IR.copy()
-        self.M_CC = CC.copy()
+        self.M_map_player = map_player.copy()
+        self.M_map_item = map_item.copy()
+        self.M_inv_info = inv_info.copy()
         
         # Output Type
         if (output_type == 'flatten'):
-            O = lst_flatten(O)
+            O = all_flatten(O)
         else: # 버그 방지
             raise SystemExit('Please check the output_type.')
         
         return O
     
-    # 플레이어 위치 반환
-    def FS_playerpos_returner(self):
+    # 플레이어 맵 반환
+    def FS_map_player(self):
         """
         플레이어의 위치를 onehot 형식으로 반환해준다.
         """
-        # 그리드 크기만큼의 PR list 생성
-        PR = [[0 for _ in range(self.grid_num[1])] for _ in range(self.grid_num[0])]
+        # 그리드 크기만큼의 map array 생성
+        map_player = np.zeros(self.grid_num)
         
-        # 플레이어가 존재하는 좌표 찾고, PR list에 onehot
-        PR[self.G_player.position[0]][self.G_player.position[1]] = 1
+        # 플레이어가 존재하는 좌표에 1 설정
+        map_player[self.G_player.position] = 1
         
-        return PR
+        return map_player
     
     # 아이템 맵 반환
-    def FS_iteminfo_returner(self):
+    def FS_map_item(self):
         """
         현재 맵에 존재하는 아이템의 정보를 반환해준다.
-        1. gridworld size가 9*7이면, 총 63칸의 list를 만든다.
-        2. 아이템이 (x,y)에 위치하고 content는 (a,b,c)라면, list의 x+y*9번째 칸에 cba(4진법)을 입력한다.
-        예1_ 위치(4,0),content(2,0)[삼각형,색없음]: list[4]=2
-        예2_ 위치(3,2),content(1,3)[원,파랑색]: list[21]=13
+        1. gridworld size가 9*7이면, 총 63칸의 array를 만든다.
+        2. 아이템이 (x,y)에 위치하고 content는 (a,b,c)라면, map[x,y]에 cba(4진법)을 입력한다.
+        예1_ 위치(4,0),content(2,0)[삼각형,색없음]: map[4,0]=2
+        예2_ 위치(3,2),content(1,3)[원,파랑색]: map[3,2]=13
         """
-        # 그리드 크기만큼의 IR list 생성
-        IR = [[0 for _ in range(self.grid_num[1])] for _ in range(self.grid_num[0])]
+        # 그리드 크기만큼의 map array 생성
+        map_item = np.zeros(self.grid_num)
         
-        # 아이템이 존재하는 좌표 찾고, IR list에 content 입력
+        # 아이템이 존재하는 좌표에 content 설정
         for item in self.G_item:
             if not item.collected:
-                IR[item.position[0]][item.position[1]] = 1
-                #IR[item.position[0]][item.position[1]] = item.content[0]+4*item.content[1]
+                map_item[item.position] = 1
+                #map_item[item.position] = item.content[0]+4*item.content[1]
             
-        return IR
+        return map_item
     
     # 인벤토리 정보 반환
-    def FS_content_classifier(self):
+    def FS_inv_info(self):
         """
         content는 1,2,3의 숫자를 사용하여 특성을 구분짓는다.
         다만 이 방식은 딥러닝의 input으로 쓰는데 문제가 있다.
@@ -248,13 +263,14 @@ class GCEnv(gym.Env):
         CC의 index는 content의 종류, value는 content의 보유수로 설정하고자 한다.
         """
         inv = self.G_player.inventory
-        CC = [[0,0,0],[0,0,0]]
+        
+        inv_info = np.zeros((2,3)) # Dimension, Content
         for i in range(3):
-            for c in range(2):
-                CC_idx = inv[i].content[c]
-                if CC_idx != 0:
-                    CC[c][CC_idx-1] += 1
-        return CC
+            for d in range(2):
+                C_idx = inv[i].content[d]
+                if C_idx != 0:
+                    inv_info[d, C_idx-1] += 1
+        return inv_info
     
     
     ## 인벤토리 체크
@@ -405,13 +421,14 @@ class GCEnv(gym.Env):
     
     # 화면 크롭
     def render_crop(self, image):
-        ## image(channel, height, width)
+        ## image(height, width, channel)
         # Grid만 crop
-        img_grid = image[:, self.grid_SP[1]:self.grid_EP[1], self.grid_SP[0]:self.grid_EP[0]]
-        img_grid = np.ascontiguousarray(img_grid, dtype=np.float32) / 255
-        img_grid = torch.from_numpy(img_grid)
+        img_ref = image[self.grid_SP[1]:self.grid_EP[1], self.grid_SP[0]:self.grid_EP[0], :]
+        img_ref = np.transpose(np.ascontiguousarray(img_ref), axes=(2,0,1)) # C, H, W
+        img_ref = torch.tensor(img_ref, dtype=torch.float).to(DV)
+        img_ref = self.resizer(img_ref).unsqueeze(0)
         
-        return self.resizer(img_grid).unsqueeze(0).to(DV)
+        return img_ref
     
     
     ## 게임 종료
@@ -568,17 +585,41 @@ def load_sound(file):
         print(f"Warning, unable to load, {file}")
     return None
 
+def key_press(key):
+    global key_switch, act
+    if not key_switch:
+        if key == keyboard.Key.space:
+            act = torch.tensor([[0]])
+        elif key == keyboard.Key.right:
+            act = 1
+        elif key == keyboard.Key.up:
+            act = 2
+        elif key == keyboard.Key.left:
+            act = 3
+        elif key == keyboard.Key.down:
+            act = 4
+        key_switch = True
+
+def key_release(key):
+    global key_switch, G_switch, act
+    key_switch = False
+    if key == keyboard.Key.esc:
+        G_switch = False
+        return False
+
 
 #%% 유틸 함수
 
 # 다중 리스트를 단일 리스트로 변환
-def lst_flatten(lst):
+def all_flatten(U):
     res = []
-    for ele in lst:
-        if isinstance(ele, list) or isinstance(ele, tuple): # 원소가 리스트 또는 튜플일 경우
-            res.extend(lst_flatten(ele))
+    for ele in U:
+        # 원소가 리스트 또는 튜플 또는 array일 경우
+        if isinstance(ele, list) or isinstance(ele, tuple) or isinstance(ele, np.ndarray):
+            res.extend(all_flatten(ele))
         else:
             res.append(ele)
+    res = np.array(res)
     return res
 
 # 경로 확인 및 경로 생성
@@ -591,8 +632,8 @@ def check_dir(path):
 
 
 # 가우시안 필터 (블러)
-# 주의 : transposed output이 나온다.
-def filter_gauss2d(size=(3,3), sigma=1):
+# 주의 : transposed array output이 나온다.
+def filter_gauss2d(size=(5,5), sigma=1):
     size = np.array(size)
     kernel = np.zeros(size)
     center = np.floor(size/2).astype(int)
@@ -605,86 +646,16 @@ def filter_gauss2d(size=(3,3), sigma=1):
 
 # 컨볼루션
 # 주의 1 : transposed input을 입력해야 한다.
-# 주의 2 : transposed output이 나온다.
-def conv2d(image, kernel, padding=1, scaling=1):
+# 주의 2 : transposed array output이 나온다.
+def conv2d(image, kernel, padding=2, scaling=1):
     K_wh = np.array(kernel.shape) # kernel width, height
-    image = np.pad(image, ((padding,padding),(padding,padding)), 'constant', constant_values=0)
+    image = np.pad(image, ((padding,)*2,)*2, 'constant', constant_values=0)
     I_wh = np.array(image.shape) # padded image width, height
     feature = np.zeros((I_wh-K_wh+1))
     for x in range(I_wh[0]-K_wh[0]+1):
         for y in range(I_wh[1]-K_wh[1]+1):
             feature[x,y] = scaling * np.sum(image[x:x+K_wh[0],y:y+K_wh[1]]*kernel)
-    feature = feature.tolist()
     return feature
-
-    
-#%% Main
-
-# 파일 경로 설정
-dir_main = os.path.split(os.path.abspath(__file__))[0]
-
-# 게임 상수 설정
-G_FPS = 100
-C_white = (255,255,255)
-C_black = (0,0,0)
-C_border = (96,96,96)
-C_inside = (192,192,192)
-C_lightgreen = (170,240,180)
-
-
-# #%% 사람 플레이
-# from pynput import keyboard
-
-# G_switch = True
-# key_switch = False
-# act = -1
-
-# def key_press(key):
-#     global key_switch, act
-#     if not key_switch:
-#         if key == keyboard.Key.space:
-#             act = 0
-#         elif key == keyboard.Key.right:
-#             act = 1
-#         elif key == keyboard.Key.up:
-#             act = 2
-#         elif key == keyboard.Key.left:
-#             act = 3
-#         elif key == keyboard.Key.down:
-#             act = 4
-#         key_switch = True
-
-# def key_release(key):
-#     global key_switch, G_switch, act
-#     key_switch = False
-#     if key == keyboard.Key.esc:
-#         G_switch = False
-#         return False
-
-# steps = int(input('플레이 스텝을 입력(step): '))
-
-# listener = keyboard.Listener(on_press=key_press, on_release=key_release)
-# listener.start()
-
-# # 환경 구성
-# env = GCEnv()
-# env.reset()
-
-# # 게임 플레이
-# step = 0
-
-# while G_switch and (step<steps):
-#     if act != -1:
-#         info = env.step(act)
-#         step += 1
-#         act = -1
-#         print(info)
-#     else:
-#         pass
-#     env.render()
-
-# del listener
-# env.close()
 
 
 #%% 모델링
@@ -718,9 +689,9 @@ class ReplayBuffer:
             lst_R.append([R])
             done_mask = 0.0 if done else 1.0
             lst_done.append([done_mask])
-        bat_S = torch.tensor(lst_S, dtype=torch.float, device=DV)
+        bat_S = torch.from_numpy(np.array(lst_S)).float().to(DV)
         bat_A = torch.tensor(lst_A, device=DV)
-        bat_S_next = torch.tensor(lst_S_next, dtype=torch.float, device=DV)
+        bat_S_next = torch.from_numpy(np.array(lst_S_next)).float().to(DV)
         bat_R = torch.tensor(lst_R, dtype=torch.float, device=DV)
         bat_done = torch.tensor(lst_done, dtype=torch.float, device=DV)
         return bat_S, bat_A, bat_S_next, bat_R, bat_done
@@ -741,7 +712,8 @@ class Network_Q(nn.Module):
     Network_Q의 output은 각 action에 대한 Q값이다.
     """
     def __init__(self, alpha, state_space, action_space):
-        # 상위 클래스인 nn.Module의 __init__ 호출 (self.parameters를 사용하기 위함)
+        # 상위 클래스인 nn.Module의 __init__ 호출
+        # (self.parameters, self.forward() 덮어쓰기를 위함)
         super().__init__()
         
         # 레이어 설정
@@ -766,7 +738,8 @@ class Network_Q_conv(nn.Module):
     state_space엔 정사각 image의 한 변의 길이가 들어가야 한다.
     """
     def __init__(self, alpha, state_space, action_space):
-        # 상위 클래스인 nn.Module의 __init__ 호출 (self.parameters를 사용하기 위함)
+        # 상위 클래스인 nn.Module의 __init__ 호출
+        # (self.parameters, self.forward() 덮어쓰기를 위함)
         super().__init__()
         
         # state_space (정사각 image의 한 변의 길이의 제곱)
@@ -865,7 +838,7 @@ class Agent_DQN:
             if self.use_cnn:
                 A = self.net_q.forward(S)
             else:
-                A = self.net_q.forward(torch.tensor(S, dtype=torch.float))
+                A = self.net_q.forward(torch.from_numpy(S).float())
             return A.argmax().item()
     
     
@@ -1316,11 +1289,49 @@ def result_record(agent):
 
 #%% Play 함수
 
-def play_human(env_render='human', env_stage=0, env_grid=(9,7),
-               play_type='save'):
+## Human
+def play_human(env_render='human', env_stage=0, env_grid=(9,7)):
     global env
-    pass
+    global key_switch
+    global act
+    
+    G_switch = True
+    key_switch = False
+    act = -1
 
+    episode_limit = int(input('플레이 할 에피소드 수를 입력(step): '))
+
+    listener = keyboard.Listener(on_press=key_press, on_release=key_release)
+    listener.start()
+
+    # 환경 구성
+    env = GCEnv(render_mode=env_render, stage_type=env_stage, grid_num=env_grid)
+
+    # 게임 플레이
+    step = 0
+    episode = 0
+
+    while (episode < episode_limit):
+        env.reset()
+        env.render()
+        while True:
+            if act != -1:
+                S, R, D, I = env.step(act)
+                env.render()
+                step += 1
+                act = -1
+                if D or not G_switch:
+                    break
+        if not G_switch:
+            break
+        episode += 1
+        step = 0
+    
+    del listener
+    env.close()
+
+
+## Agent
 def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='onehot',
                model_name='DQN', model_ST=500, model_EL=1000, model_ED=0.998,
                play_type='save'):
@@ -1355,6 +1366,8 @@ def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='oneho
 
 #%% 플레이
 
-play_agent(env_render='agent', env_stage=1, env_grid=(9,7), env_state='semiconv_ego',
-           model_name='DQN', model_ST=500, model_EL=8000, model_ED=0.9997,
-           play_type='save')
+# play_human(env_render='human', env_stage=0, env_grid=(9,7))
+
+play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='semiconv_ego',
+            model_name='DQN', model_ST=500, model_EL=1000, model_ED=0.995,
+            play_type='save')
