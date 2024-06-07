@@ -89,7 +89,7 @@ class GCEnv(gym.Env):
             self.state_space = (grid_num[0]*grid_num[1]+6)*2
             self.kernel = filter_gauss2d(sigma=1)
         elif (state_type == 'semiconv_ego'):
-            self.player_sight = 2
+            self.player_sight = 3
             self.state_space = 6+((2*self.player_sight+1)**2)*2
             self.kernel = filter_gauss2d(sigma=1)
         elif (state_type == 'conv'):
@@ -136,7 +136,8 @@ class GCEnv(gym.Env):
                 self.reward = self.R_vain # 허공에서 수집 액션한 경우
                 self.info['Eval'] = 'vain'
             else:
-                self.reward = self.R_step # 이동한 경우
+                R = self.R_step
+                self.reward = R * self.FR_distance()
                 self.info['Eval'] = 'step'
             self.done = False
         elif (inv_after > inv_before): # 아이템 수집 시
@@ -303,7 +304,20 @@ class GCEnv(gym.Env):
         else:
             self.reward = self.R_full
             self.info['Eval'] = 'full'
-        
+    
+    # 플레이어와 맵에 남아있는 아이템의 유클리드 거리 기하 평균에 기반한 cost
+    def FR_distance(self):
+        player_pos = self.G_player.position
+        num_item = 0
+        geo_mean = 1
+        for item in self.G_item:
+            if not item.collected:
+                num_item += 1
+                distance = ((player_pos[0]-item.position[0])**2 + (player_pos[1]-item.position[1])**2)**(1/2)
+                geo_mean *= distance
+        geo_mean = geo_mean ** (1/num_item)
+        return geo_mean
+    
     
     ## 렌더 함수
     # 렌더 초기화
@@ -561,6 +575,12 @@ class GCEnv(gym.Env):
             for idx in range(5):
                 pos = (position_list[idx]%self.grid_num[0], position_list[idx]//self.grid_num[0])
                 ItemSet.append(self.Item(self,content_list[idx],pos))
+        elif (stage_type==2):
+            position_list = random.sample(range(self.grid_num[0]*self.grid_num[1]),5)
+            ItemSet = []
+            for idx in range(5):
+                pos = (position_list[idx]%self.grid_num[0], position_list[idx]//self.grid_num[0])
+                ItemSet.append(self.Item(self,(1,1),pos))
         return ItemSet
     
     
@@ -592,7 +612,7 @@ def key_press(key):
     global key_switch, act
     if not key_switch:
         if key == keyboard.Key.space:
-            act = torch.tensor([[0]])
+            act = 0
         elif key == keyboard.Key.right:
             act = 1
         elif key == keyboard.Key.up:
@@ -1640,16 +1660,19 @@ def result_show(agent):
             epi_interval[epi_type].append([idx])
     epi_interval[epi_type][-1].append(len(epi_end)-1)
     
-    for X in epi_interval[0]:
-        itv_0 = ax.fill_between(X, Y_top, Y_bottom, color='blue', alpha=0.5)
-    for X in epi_interval[1]:
-        itv_1 = ax.fill_between(X, Y_top, Y_bottom, color='green', alpha=0.5)
-    for X in epi_interval[2]:
-        itv_2 = ax.fill_between(X, Y_top, Y_bottom, color='red', alpha=0.5)
-    itv_0.set_label('Rule')
-    itv_1.set_label('Full')
-    itv_2.set_label('Fail')
-    
+    if epi_interval[0]:
+        for X in epi_interval[0]:
+            itv_0 = ax.fill_between(X, Y_top, Y_bottom, color='blue', alpha=0.5)
+        itv_0.set_label('Rule')
+    if epi_interval[1]:
+        for X in epi_interval[1]:
+            itv_1 = ax.fill_between(X, Y_top, Y_bottom, color='green', alpha=0.5)
+        itv_1.set_label('Full')
+    if epi_interval[2]:
+        for X in epi_interval[2]:
+            itv_2 = ax.fill_between(X, Y_top, Y_bottom, color='red', alpha=0.5)
+        itv_2.set_label('Fail')
+        
     ax.plot(G, color='blue', linewidth=0.8)
     ax.legend(loc='lower right')
     fig.savefig(f'{path}/[S{N_stage}]f2.png')
@@ -1773,7 +1796,7 @@ def play_human(env_render='human', env_stage=0, env_grid=(9,7)):
 
 ## Agent
 def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='onehot',
-               model_name='DQN', model_ST=500, model_EL=1000, model_ED=0.998,
+               model_name='DQN', model_ST=500, model_EL=1000, model_ED=0.999,
                play_type='save'):
     """
     play_type
@@ -1812,8 +1835,9 @@ def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='oneho
     
     # 모델 학습
     agent.train(mode_trace=True)
-    result_show(agent)
-    result_record(agent)
+    if (play_type != 'load'):
+        result_show(agent)
+        result_record(agent)
     
     if (play_type=='save'):
         # 모델 저장
@@ -1824,6 +1848,6 @@ def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='oneho
 
 # play_human(env_render='human', env_stage=0, env_grid=(9,7))
 
-play_agent(env_render='human', env_stage=1, env_grid=(9,7), env_state='semiconv_ego',
-            model_name='DDQN', model_ST=500, model_EL=1000, model_ED=0.995,
+play_agent(env_render='human', env_stage=2, env_grid=(9,7), env_state='semiconv_ego',
+            model_name='DDQN', model_ST=500, model_EL=100, model_ED=0.999,
             play_type='load')
