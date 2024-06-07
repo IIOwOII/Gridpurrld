@@ -25,7 +25,7 @@ import torchvision.transforms as T
 dir_main = os.path.split(os.path.abspath(__file__))[0]
 
 # 게임 상수 설정
-G_FPS = 100
+G_FPS = 30
 C_white = (255,255,255)
 C_black = (0,0,0)
 C_border = (96,96,96)
@@ -90,7 +90,7 @@ class GCEnv(gym.Env):
             self.kernel = filter_gauss2d(sigma=1)
         elif (state_type == 'semiconv_ego'):
             self.player_sight = 2
-            self.state_space = 6+(2*self.player_sight+1)**2
+            self.state_space = 6+((2*self.player_sight+1)**2)*2
             self.kernel = filter_gauss2d(sigma=1)
         elif (state_type == 'conv'):
             self.state_space = 40
@@ -189,10 +189,13 @@ class GCEnv(gym.Env):
         elif (self.state_type == 'semiconv_ego'):
             ps = self.player_sight
             pp = self.G_player.position
-            minimap = conv2d(map_item, self.kernel, scaling=10)
-            minimap = np.pad(minimap, ((ps,)*2,)*2, 'constant', constant_values=0)
+            M_minimap = np.pad(self.M_map_item, ((ps,)*2,)*2, 'constant', constant_values=0)
+            M_minimap = conv2d(M_minimap, self.kernel, scaling=10)
+            minimap = np.pad(map_item, ((ps,)*2,)*2, 'constant', constant_values=0)
+            minimap = conv2d(minimap, self.kernel, scaling=10)
+            M_map_sight = M_minimap[pp[0]:pp[0]+2*ps+1, pp[1]:pp[1]+2*ps+1]
             map_sight = minimap[pp[0]:pp[0]+2*ps+1, pp[1]:pp[1]+2*ps+1]
-            O = [map_sight, inv_info]
+            O = [M_map_sight, map_sight, inv_info]
         elif (self.state_type == 'conv'):
             image = np.transpose(pg.surfarray.pixels3d(self.screen), axes=(1,0,2)) # H, W, C
             O = self.render_crop(image=image)
@@ -658,8 +661,8 @@ def conv2d(image, kernel, padding=2, scaling=1):
     return feature
 
 
-#%% 모델링
-
+#%% Modeling
+## Buffer
 class ReplayBuffer:
     def __init__(self, buffer_size):
         # 가장 오래된 replay memory부터 지우는 deque로 정의
@@ -704,9 +707,7 @@ class ReplayBuffer:
         self.buffer.append(transition)
     
 
-#%% DQN
-#class Network_
-
+## Network Set
 class Network_Q(nn.Module):
     """
     Network_Q의 output은 각 action에 대한 Q값이다.
@@ -767,14 +768,58 @@ class Network_Q_conv(nn.Module):
         S = F.relu(self.fc1(S))
         Q = self.fc2(S)
         return Q
-        
 
-class Agent_DQN:
+
+class Network_Actor(nn.Module):
+    def __init__(self, alpha, state_space, action_space):
+        # 상위 클래스인 nn.Module의 __init__ 호출 (self.parameters를 사용하기 위함)
+        super().__init__()
+        
+        # 레이어 설정
+        self.fc1 = nn.Linear(state_space, 256)
+        self.fc2 = nn.Linear(256, 256)
+        self.fc3 = nn.Linear(256, action_space)
+        
+        # Adam 기법으로 최적화
+        self.optimizer = optim.Adam(self.parameters(), lr=alpha)
+    
+    def forward(self, S):
+        # Input: State, Output: Policy
+        S = F.relu(self.fc1(S))
+        S = F.relu(self.fc2(S))
+        pi = F.softmax(self.fc3(S), dim=1)
+        return pi
+
+
+class Network_Critic(nn.Module):
+    def __init__(self, alpha, state_space):
+        # 상위 클래스인 nn.Module의 __init__ 호출 (self.parameters를 사용하기 위함)
+        super().__init__()
+        
+        # 레이어 설정
+        self.fc1 = nn.Linear(state_space, 256)
+        self.fc2 = nn.Linear(256, 256)
+        self.fc3 = nn.Linear(256, 1)
+        
+        # Adam 기법으로 최적화
+        self.optimizer = optim.Adam(self.parameters(), lr=alpha)
+    
+    def forward(self, S):
+        # Input: State, Output: Value function
+        S = F.relu(self.fc1(S))
+        S = F.relu(self.fc2(S))
+        V = self.fc3(S)
+        return V
+
+
+#%% Agent
+# DDQ (Deep Dyna Q)
+class Agent_DDQ:
     def __init__(self, env, gamma=0.99, alpha=0.0005, epsilon=1.0, epsilon_decay=0.998, 
                  buffer_size=20000, batch_size=64,
                  episode_limit=2000, step_truncate=1000, step_target_update=500):
         # 모델명
-        self.name = 'DQN'
+        self.name = 'DDQ'
         
         # 환경 입력
         self.env = env
@@ -977,222 +1022,591 @@ class Agent_DQN:
         # 학습 종료
         env.close()
 
-
-#%% A2C
-# Actor Network
-class Network_Actor(nn.Module):
-    def __init__(self, alpha, state_space, action_space):
-        # 상위 클래스인 nn.Module의 __init__ 호출 (self.parameters를 사용하기 위함)
-        super().__init__()
+# DQN
+class Agent_DQN:
+    def __init__(self, env, gamma=0.99, alpha=0.0005, epsilon=1.0, epsilon_decay=0.998, 
+                 buffer_size=20000, batch_size=64,
+                 episode_limit=2000, step_truncate=1000, step_target_update=500):
+        # 모델명
+        self.name = 'DQN'
         
-        # 레이어 설정
-        self.fc1 = nn.Linear(state_space, 256)
-        self.fc2 = nn.Linear(256, 256)
-        self.fc3 = nn.Linear(256, action_space)
+        # 환경 입력
+        self.env = env
         
-        # Adam 기법으로 최적화
-        self.optimizer = optim.Adam(self.parameters(), lr=alpha)
-    
-    def forward(self, S):
-        # Input: State, Output: Policy
-        S = F.relu(self.fc1(S))
-        S = F.relu(self.fc2(S))
-        pi = F.softmax(self.fc3(S), dim=1)
-        return pi
-
-
-# Critic Network
-class Network_Critic(nn.Module):
-    def __init__(self, alpha, state_space):
-        # 상위 클래스인 nn.Module의 __init__ 호출 (self.parameters를 사용하기 위함)
-        super().__init__()
+        # state와 action의 dimension
+        self.S_dim = env.state_space
+        self.A_dim = env.action_space.n
         
-        # 레이어 설정
-        self.fc1 = nn.Linear(state_space, 256)
-        self.fc2 = nn.Linear(256, 256)
-        self.fc3 = nn.Linear(256, 1)
+        # env의 state가 image일 때 CNN 사용
+        if (env.state_type == 'conv'):
+            self.use_cnn = True
+        else:
+            self.use_cnn = False
         
-        # Adam 기법으로 최적화
-        self.optimizer = optim.Adam(self.parameters(), lr=alpha)
-    
-    def forward(self, S):
-        # Input: State, Output: Value function
-        S = F.relu(self.fc1(S))
-        S = F.relu(self.fc2(S))
-        V = self.fc3(S)
-        return V
-
-
-# A2C Agent
-# class Agent_A2C:
-#     def __init__(self, env, gamma=0.99, alpha=0.0002, 
-#                   buffer_size=10000, batch_size=64, 
-#                   episode_limit=2000, step_truncate=1000, step_target_update=1000):
-#         """
-#         Actor-Critic Agent (TD)
+        # policy 초기화
+        if self.use_cnn:
+            self.net_Q = Network_Q_conv(alpha, self.S_dim, self.A_dim).to(DV)
+            self.net_Q_target = Network_Q_conv(alpha, self.S_dim, self.A_dim).to(DV)
+        else:
+            self.net_Q = Network_Q(alpha, self.S_dim, self.A_dim).to(DV)
+            self.net_Q_target = Network_Q(alpha, self.S_dim, self.A_dim).to(DV)
+        self.target_update()
         
-#         Args:
-#             env : Agent가 속한 환경
-#             gamma : Discount Factor of Return
-#             alpha : 그래디언트 학습률 (Learning Rate)
-#         """
-#         # 모델명
-#         self.name = 'A2C'
+        # Discount factor
+        self.gamma = gamma
         
-#         # 환경 입력
-#         self.env = env
+        # Exploration factor
+        self.epsilon = epsilon
+        self.epsilon_decay = epsilon_decay
         
-#         # state와 action의 dimension
-#         self.S_dim = env.state_space
-#         self.A_dim = env.action_space.n
+        # Replay
+        self.buffer_size = buffer_size
+        self.batch_size = batch_size
+        self.step_target_update = step_target_update # target network를 업데이트하는 주기
+        self.replay_buffer = ReplayBuffer(buffer_size)
         
-#         # Hyperparameter
-#         self.gamma = gamma # Discount Factor
-#         self.alpha = alpha # Learning Rate
+        # 최대 에피소드 & 한 에피소드 당 최대 스텝 수 설정
+        self.step_truncate = step_truncate
+        self.episode_limit = episode_limit
         
-#         # Actor-Critic Network
-#         self.net_pi = Network_Actor(alpha, self.S_dim, self.A_dim)
-#         self.net_v = Network_Critic(alpha, self.S_dim)
-        
-#         # Replay Buffer
-#         self.buffer_size = buffer_size
-#         self.batch_size = batch_size
-#         self.step_target_update = step_target_update # target network를 업데이트하는 주기
-#         self.replay_buffer = ReplayBuffer(self.buffer_size)
-        
-#         # 최대 에피소드 & 한 에피소드 당 최대 스텝 수 설정
-#         self.step_truncate = step_truncate
-#         self.episode_limit = episode_limit
-
-
-#     def learn(self):
-#         S, A, S_next, R, done = self.replay_buffer.make_batch(self.batch_size)
-#         td_target = R + self.gamma * self.net_v.forward(S_next) * done
-#         delta = td_target - self.net_v.forward(S)
-        
-#         # 1. 현재 Actor network에 batch_size만큼의 S_old를 입력하고, 그에 따른 action 확률 분포 p(a|S_old)를 출력
-#         # 2. S_old에서 A_old를 선택했었다면, p(A_old|S_old)만 선택적으로 수집
-#         # 3. 결론적으로, pi_a는 p(A_old|S_old)가 batch size만큼 모인 tensor
-#         pi_a = torch.gather(self.net_pi.forward(S), dim=1, index=A)
-        
-#         ## Critic Network 업데이트
-
-#         F.smooth_l1_loss(self.net_v.forward(S), td_target.detach())
-        
-        
-#         ## Actor Network 업데이트
-#         # Backprop 과정에서 net_pi의 weight가 계속 업데이트됨.
-#         # 그 과정에서 delta의 값이 계속해서 변함.
-#         # 따라서, delta값은 detach 함수로 상수 취급. (값 고정)
-#         loss_pi = -torch.log(pi_a) * delta.detach()
-#         self.net_pi.optimizer.zero_grad()
-#         loss_pi.mean().backward()
-#         self.net_pi.optimizer.step()
-        
-    
-#     @tf.function
-#     def learn(self, S, A, S_next, R, done):
-#         """
-#         Q 함수를 예측하는 Q net을 학습
-#         \n S = state(t)
-#         A = action(t)
-#         S_next = state(t+1)
-#         R = reward(t+1)
-#         """
-#         Q_target = R + (1-done)*self.gamma*tf.reduce_max(self.Qnet_target(S_next), axis=1, keepdims=True)
-        
-#         with tf.GradientTape() as tape:
-#             Q_behavior = self.Qnet_behavior(S)
-#             A_onehot = tf.one_hot(tf.cast(tf.reshape(A, [-1]), tf.int32), self.A_dim)
-#             Q_behavior = tf.reduce_sum(Q_behavior*A_onehot, axis=1, keepdims=True)
-#             loss = self.loss_func(Q_target, Q_behavior)
-#         grads = tape.gradient(loss, self.Qnet_behavior.trainable_weights)
-#         self.optimizer.apply_gradients(zip(grads, self.Qnet_behavior.trainable_weights))
+        # Episode End 정보 저장
+        # [0]: rule, [1]: full, [2]: truncate
+        self.episode_end = []
     
     
-#     def target_update(self):
-#         self.Qnet_target.set_weights(self.Qnet_behavior.get_weights())
+    # 학습된 모델 저장
+    def model_save(self):
+        path = f'./Model/{self.name}'
+        check_dir(path)
+        model_type = f'[S{self.env.stage_type}][{self.env.state_type}]'
+        torch.save(self.net_Q.state_dict(), f'{path}/{model_type}net_Q(param).pt')
+        torch.save(self.net_Q, f'{path}/{model_type}net_Q(all).pt')
+        
+        
+    # state가 주어졌을 때 action을 선택하는 방식
+    def epsilon_greedy(self, S):
+        # 탐색률 업데이트 (최소 0.01까지만)
+        self.epsilon = max(self.epsilon, 0.01)
+        if random.random() <= self.epsilon: # 탐색
+            return random.randint(0, self.A_dim-1)
+        else:
+            if self.use_cnn:
+                A = self.net_Q.forward(S)
+            else:
+                S = torch.from_numpy(S).float()
+                Q = self.net_Q.forward(S)
+                A = Q.argmax().item()
+            return A
+    
+    
+    def target_update(self):
+        """
+        Behavior Network Parameter를 복사하여 Target Network Parameter 교체
+        """
+        self.net_q_target.load_state_dict(self.net_q.state_dict())
+    
+    
+    def learn(self):
+        """
+        Q 함수를 예측하는 Q net을 학습
+        \n S = state(t)
+        A = action(t)
+        S_next = state(t+1)
+        R = reward(t+1)
+        D = done mask (True: 0, False: 1)
+        """
+        # Replay Memory 샘플링
+        S, A, S_next, R, D = self.replay_buffer.make_batch(self.batch_size)
+        
+        # Q value
+        Q = torch.gather(self.net_Q(S), dim=1, index=A)
+        max_Q_next = torch.max(self.net_Q_target(S_next), dim=1)[0].unsqueeze(1)
+        
+        # Target Q
+        Q_target = R + D*self.gamma*max_Q_next
+        
+        # Gradient Descent
+        loss = F.smooth_l1_loss(Q, Q_target)
+        self.net_Q.optimizer.zero_grad()
+        loss.backward()
+        self.net_Q.optimizer.step()
+        
+        return loss.item()
             
     
-#     def train(self, mode_trace=False):
-#         """
-#         모델 학습
-#         \n mode_trace가 True면 실시간으로 에피소드에 대한 정보 출력
-#         S = state(t)
-#         A = action(t)
-#         S_next = state(t+1)
-#         R = reward(t+1)
-#         G = return
-#         """
+    def train(self, mode_trace=False):
+        """
+        모델 학습
+        \n mode_trace가 True면 실시간으로 에피소드에 대한 정보 출력
+        S = state(t)
+        A = action(t)
+        S_next = state(t+1)
+        R = reward(t+1)
+        G = return
+        """
+        # global step, return list, step list, loss list는 class에 저장
+        self.global_step = 0
+        self.G_list = []
+        self.step_list = []
+        self.loss_list = []
         
-#         # global step, return list, step list는 class에 저장
-#         self.global_step = 0
-#         self.G_list = []
-#         self.step_list = []
-#         epochs = 0
+        # Episode Number
+        episode = 0
         
-#         # 사전에 지정한 episode 상한까지 학습
-#         while epochs < self.episode_limit:
-#             S = env.reset()
-#             G = 0
-#             step = 0
-#             while step < self.step_truncate:
-#                 A = self.epsilon_greedy(S) # 
-#                 S_next, R, done, _ = env.step(A)
-                
-#                 # Replay Buffer 생성
-#                 transition = (S, A, S_next, R, done)
-#                 self.replay_buffer.append(transition)
-                
-#                 # return(한 에피소드 내 모든 보상, 따라서 gamma decay 안함)과 state update
-#                 G += R
-#                 S = S_next
-                
-#                 # 렌더링
-#                 self.env.render()
-                
-#                 # 실시간으로 진행 중인 global step 출력
-#                 if mode_trace:
-#                     if (self.global_step%100)==0:
-#                         print(self.global_step)
-                
-#                 # replay buffer가 충분히 모이면 Qnet 학습 시작
-#                 if self.global_step > 1000:
-#                     transitions = self.replay_buffer.sample(batch_size=self.batch_size)
-#                     self.learn(*map(lambda x: np.vstack(x).astype('float32'), np.transpose(transitions)))
-                
-#                 # step update
-#                 step += 1
-#                 self.global_step += 1
-                
-#                 # 에피소드 종료
-#                 if done:
-#                     break
+        # 사전에 지정한 episode 상한까지 학습
+        while episode < self.episode_limit:
+            S = env.reset()
+            G = 0
+            step = 0
+            loss_episode = 0
             
-#             # Return, step 기록
-#             self.G_list.append(G)
-#             self.step_list.append(step)
-#             self.target_update()
+            # replay buffer가 충분히 모이면 Qnet 학습 시작
+            if self.global_step > 5000:
+                switch_learning = True
+            else:
+                switch_learning = False
             
-#             # 에피소드 정보 출력
-#             if mode_trace:
-#                 print(f'episode:{epochs+1}, score:{G}, step:{step}')
+            # episode가 끝나거나, step limit에 도달하기 전까지 loop
+            while step < self.step_truncate:
+                # 렌더링
+                self.env.render()
+                
+                # Experience
+                A = self.epsilon_greedy(S)
+                S_next, R, done, _ = env.step(A)
+                
+                # Replay Buffer 생성
+                transition = (S, A, S_next, R, done)
+                self.replay_buffer.append(transition)
+                
+                # return(한 에피소드 내 모든 보상, 따라서 gamma decay 안함)과 state update
+                G += R
+                S = S_next
+                
+                # 실시간으로 진행 중인 global step 출력
+                if mode_trace:
+                    if (self.global_step % 100)==0:
+                        print(self.global_step)
+                
+                # Target Network Update
+                if (self.global_step % self.step_target_update)==0:
+                    self.target_update()
+                
+                # Network 학습
+                if switch_learning:
+                    loss_step = self.learn()
+                    loss_episode += loss_step
+                
+                # step update
+                step += 1
+                self.global_step += 1
+                
+                # 에피소드 종료
+                if done:
+                    break
             
-#             # episode & epsilon update
-#             epochs += 1
-#             self.epsilon *= self.epsilon_decay
+            # 평균 loss 계산
+            loss_mean = loss_episode / step
+            
+            # Return, step, mean loss 기록
+            self.G_list.append(G)
+            self.step_list.append(step)
+            self.loss_list.append(loss_mean)
+            
+            # Episode End 기록
+            episode_eval = env.info['Eval']
+            if (episode_eval=='rule'): # Rule 충족 시
+                end_type = 0
+            elif (episode_eval=='full'): # 단순 아이템 3개 수집 시
+                end_type = 1
+            else: # 실패
+                end_type = 2
+            self.episode_end.append(end_type)
+            
+            # 에피소드 정보 출력
+            if mode_trace:
+                print(f'episode:{episode+1}, score:{G:.3f}, step:{step}')
+            
+            # episode & epsilon update
+            episode += 1
+            self.epsilon *= self.epsilon_decay
         
-#         # 학습 종료
-#         env.close()
+        # 학습 종료
+        env.close()
+
+
+# DDQN
+class Agent_DDQN:
+    def __init__(self, env, gamma=0.99, alpha=0.0005, epsilon=1.0, epsilon_decay=0.998,
+                 buffer_size=20000, batch_size=64,
+                 episode_limit=2000, step_truncate=1000, step_target_update=500):
+        # 모델명
+        self.name = 'DDQN'
+        
+        # 환경 입력
+        self.env = env
+        
+        # state와 action의 dimension
+        self.S_dim = env.state_space
+        self.A_dim = env.action_space.n
+        
+        # policy 초기화
+        self.net_Q_outer = Network_Q(alpha, self.S_dim, self.A_dim).to(DV) # evaluation
+        self.net_Q_inner = Network_Q(alpha, self.S_dim, self.A_dim).to(DV) # selection (target net)
+        self.target_update()
+        
+        # Discount factor
+        self.gamma = gamma
+        
+        # Exploration factor
+        self.epsilon = epsilon
+        self.epsilon_decay = epsilon_decay
+        
+        # Replay
+        self.buffer_size = buffer_size
+        self.batch_size = batch_size
+        self.step_target_update = step_target_update # target network를 업데이트하는 주기
+        self.replay_buffer = ReplayBuffer(buffer_size)
+        
+        # 최대 에피소드 & 한 에피소드 당 최대 스텝 수 설정
+        self.step_truncate = step_truncate
+        self.episode_limit = episode_limit
+        
+        # Episode End 정보 저장
+        # [0]: rule, [1]: full, [2]: truncate
+        self.episode_end = []
+    
+    
+    # 학습된 모델 저장
+    def model_save(self):
+        path = f'./Model/{self.name}'
+        check_dir(path)
+        model_type = f'[S{self.env.stage_type}][{self.env.state_type}]'
+        torch.save(self.net_Q_outer.state_dict(), f'{path}/{model_type}net_Q(param).pt')
+        torch.save(self.net_Q_outer, f'{path}/{model_type}net_Q(all).pt')
+        
+        
+    # state가 주어졌을 때 action을 선택하는 방식
+    def epsilon_greedy(self, S):
+        # 탐색률 업데이트 (최소 0.01까지만)
+        self.epsilon = max(self.epsilon, 0.01)
+        if random.random() <= self.epsilon: # 탐색
+            return random.randint(0, self.A_dim-1)
+        else:
+            S = torch.from_numpy(S).float()
+            Q = self.net_Q_outer.forward(S)
+            A = Q.argmax().item()
+            return A
+    
+    
+    def target_update(self):
+        """
+        Behavior Network Parameter를 복사하여 Target Network Parameter 교체
+        """
+        self.net_Q_inner.load_state_dict(self.net_Q_outer.state_dict())
+    
+    
+    def learn(self):
+        """
+        Q 함수를 예측하는 Q net을 학습
+        \n S = state(t)
+        A = action(t)
+        S_next = state(t+1)
+        R = reward(t+1)
+        D = done mask (True: 0, False: 1)
+        """
+        # Replay Memory 샘플링
+        S, A, S_next, R, D = self.replay_buffer.make_batch(self.batch_size)
+        
+        # Q value
+        Q = torch.gather(self.net_Q_outer(S), dim=1, index=A)
+        max_A_next = torch.max(self.net_Q_inner(S_next), dim=1)[1].unsqueeze(1)
+        Q_next = torch.gather(self.net_Q_outer(S_next), dim=1, index=max_A_next)
+        
+        # Target Q
+        Q_target = R + D*self.gamma*Q_next
+        
+        # Gradient Descent
+        loss = F.smooth_l1_loss(Q, Q_target)
+        self.net_Q_outer.optimizer.zero_grad()
+        loss.backward()
+        self.net_Q_outer.optimizer.step()
+        
+        return loss.item()
+            
+    
+    def train(self, mode_trace=False):
+        """
+        모델 학습
+        \n mode_trace가 True면 실시간으로 에피소드에 대한 정보 출력
+        S = state(t)
+        A = action(t)
+        S_next = state(t+1)
+        R = reward(t+1)
+        G = return
+        """
+        # global step, return list, step list, loss list는 class에 저장
+        self.global_step = 0
+        self.G_list = []
+        self.step_list = []
+        self.loss_list = []
+        
+        # Episode Number
+        episode = 0
+        
+        # 사전에 지정한 episode 상한까지 학습
+        while episode < self.episode_limit:
+            S = env.reset()
+            G = 0
+            step = 0
+            loss_episode = 0
+            
+            # replay buffer가 충분히 모이면 Qnet 학습 시작
+            if self.global_step > 5000:
+                switch_learning = True
+            else:
+                switch_learning = False
+            
+            # episode가 끝나거나, step limit에 도달하기 전까지 loop
+            while step < self.step_truncate:
+                # 렌더링
+                self.env.render()
+                
+                # Experience
+                A = self.epsilon_greedy(S)
+                S_next, R, done, _ = env.step(A)
+                
+                # Replay Buffer 생성
+                transition = (S, A, S_next, R, done)
+                self.replay_buffer.append(transition)
+                
+                # return(한 에피소드 내 모든 보상, 따라서 gamma decay 안함)과 state update
+                G += R
+                S = S_next
+                
+                # 실시간으로 진행 중인 global step 출력
+                if mode_trace:
+                    if (self.global_step % 100)==0:
+                        print(self.global_step)
+                
+                # Target Network Update
+                if (self.global_step % self.step_target_update)==0:
+                    self.target_update()
+                
+                # Network 학습
+                if switch_learning:
+                    loss_step = self.learn()
+                    loss_episode += loss_step
+                
+                # step update
+                step += 1
+                self.global_step += 1
+                
+                # 에피소드 종료
+                if done:
+                    break
+            
+            # 평균 loss 계산
+            loss_mean = loss_episode / step
+            
+            # Return, step, mean loss 기록
+            self.G_list.append(G)
+            self.step_list.append(step)
+            self.loss_list.append(loss_mean)
+            
+            # Episode End 기록
+            episode_eval = env.info['Eval']
+            if (episode_eval=='rule'): # Rule 충족 시
+                end_type = 0
+            elif (episode_eval=='full'): # 단순 아이템 3개 수집 시
+                end_type = 1
+            else: # 실패
+                end_type = 2
+            self.episode_end.append(end_type)
+            
+            # 에피소드 정보 출력
+            if mode_trace:
+                print(f'episode:{episode+1}, score:{G:.3f}, step:{step}')
+            
+            # episode & epsilon update
+            episode += 1
+            self.epsilon *= self.epsilon_decay
+        
+        # 학습 종료
+        env.close()
+
+# A2C
+class Agent_A2C:
+    def __init__(self, env, gamma=0.99, alpha=0.0002, 
+                  buffer_size=10000, batch_size=64, 
+                  episode_limit=2000, step_truncate=1000, step_target_update=1000):
+        """
+        Actor-Critic Agent (TD)
+        
+        Args:
+            env : Agent가 속한 환경
+            gamma : Discount Factor of Return
+            alpha : 그래디언트 학습률 (Learning Rate)
+        """
+        # 모델명
+        self.name = 'A2C'
+        
+        # 환경 입력
+        self.env = env
+        
+        # state와 action의 dimension
+        self.S_dim = env.state_space
+        self.A_dim = env.action_space.n
+        
+        # Hyperparameter
+        self.gamma = gamma # Discount Factor
+        self.alpha = alpha # Learning Rate
+        
+        # Actor-Critic Network
+        self.net_pi = Network_Actor(alpha, self.S_dim, self.A_dim)
+        self.net_v = Network_Critic(alpha, self.S_dim)
+        
+        # Replay Buffer
+        self.buffer_size = buffer_size
+        self.batch_size = batch_size
+        self.step_target_update = step_target_update # target network를 업데이트하는 주기
+        self.replay_buffer = ReplayBuffer(self.buffer_size)
+        
+        # 최대 에피소드 & 한 에피소드 당 최대 스텝 수 설정
+        self.step_truncate = step_truncate
+        self.episode_limit = episode_limit
+
+
+    def learn(self):
+        S, A, S_next, R, done = self.replay_buffer.make_batch(self.batch_size)
+        td_target = R + self.gamma * self.net_v.forward(S_next) * done
+        delta = td_target - self.net_v.forward(S)
+        
+        # 1. 현재 Actor network에 batch_size만큼의 S_old를 입력하고, 그에 따른 action 확률 분포 p(a|S_old)를 출력
+        # 2. S_old에서 A_old를 선택했었다면, p(A_old|S_old)만 선택적으로 수집
+        # 3. 결론적으로, pi_a는 p(A_old|S_old)가 batch size만큼 모인 tensor
+        pi_a = torch.gather(self.net_pi.forward(S), dim=1, index=A)
+        
+        ## Critic Network 업데이트
+
+        F.smooth_l1_loss(self.net_v.forward(S), td_target.detach())
+        
+        
+        ## Actor Network 업데이트
+        # Backprop 과정에서 net_pi의 weight가 계속 업데이트됨.
+        # 그 과정에서 delta의 값이 계속해서 변함.
+        # 따라서, delta값은 detach 함수로 상수 취급. (값 고정)
+        loss_pi = -torch.log(pi_a) * delta.detach()
+        self.net_pi.optimizer.zero_grad()
+        loss_pi.mean().backward()
+        self.net_pi.optimizer.step()
+        
+    
+    # @tf.function
+    # def learn(self, S, A, S_next, R, done):
+    #     """
+    #     Q 함수를 예측하는 Q net을 학습
+    #     \n S = state(t)
+    #     A = action(t)
+    #     S_next = state(t+1)
+    #     R = reward(t+1)
+    #     """
+    #     Q_target = R + (1-done)*self.gamma*tf.reduce_max(self.Qnet_target(S_next), axis=1, keepdims=True)
+        
+    #     with tf.GradientTape() as tape:
+    #         Q_behavior = self.Qnet_behavior(S)
+    #         A_onehot = tf.one_hot(tf.cast(tf.reshape(A, [-1]), tf.int32), self.A_dim)
+    #         Q_behavior = tf.reduce_sum(Q_behavior*A_onehot, axis=1, keepdims=True)
+    #         loss = self.loss_func(Q_target, Q_behavior)
+    #     grads = tape.gradient(loss, self.Qnet_behavior.trainable_weights)
+    #     self.optimizer.apply_gradients(zip(grads, self.Qnet_behavior.trainable_weights))
+    
+    
+    def target_update(self):
+        self.Qnet_target.set_weights(self.Qnet_behavior.get_weights())
+            
+    
+    def train(self, mode_trace=False):
+        """
+        모델 학습
+        \n mode_trace가 True면 실시간으로 에피소드에 대한 정보 출력
+        S = state(t)
+        A = action(t)
+        S_next = state(t+1)
+        R = reward(t+1)
+        G = return
+        """
+        
+        # global step, return list, step list는 class에 저장
+        self.global_step = 0
+        self.G_list = []
+        self.step_list = []
+        epochs = 0
+        
+        # 사전에 지정한 episode 상한까지 학습
+        while epochs < self.episode_limit:
+            S = env.reset()
+            G = 0
+            step = 0
+            while step < self.step_truncate:
+                A = self.epsilon_greedy(S) # 
+                S_next, R, done, _ = env.step(A)
+                
+                # Replay Buffer 생성
+                transition = (S, A, S_next, R, done)
+                self.replay_buffer.append(transition)
+                
+                # return(한 에피소드 내 모든 보상, 따라서 gamma decay 안함)과 state update
+                G += R
+                S = S_next
+                
+                # 렌더링
+                self.env.render()
+                
+                # 실시간으로 진행 중인 global step 출력
+                if mode_trace:
+                    if (self.global_step%100)==0:
+                        print(self.global_step)
+                
+                # replay buffer가 충분히 모이면 Qnet 학습 시작
+                if self.global_step > 1000:
+                    transitions = self.replay_buffer.sample(batch_size=self.batch_size)
+                    self.learn(*map(lambda x: np.vstack(x).astype('float32'), np.transpose(transitions)))
+                
+                # step update
+                step += 1
+                self.global_step += 1
+                
+                # 에피소드 종료
+                if done:
+                    break
+            
+            # Return, step 기록
+            self.G_list.append(G)
+            self.step_list.append(step)
+            self.target_update()
+            
+            # 에피소드 정보 출력
+            if mode_trace:
+                print(f'episode:{epochs+1}, score:{G}, step:{step}')
+            
+            # episode & epsilon update
+            epochs += 1
+            self.epsilon *= self.epsilon_decay
+        
+        # 학습 종료
+        env.close()
 
 
 #%% 학습 결과 출력 및 기록
-
 def result_show(agent):
     ## 기본 설정
     plt.rc('font', size=14)
     N_stage = agent.env.stage_type
-    N_agent = agent.name
+    
+    ## 경로 확인
+    path = f'{dir_main}/Model/{agent.name}'
+    check_dir(path)
     
     ## f1. Model Summary 시각화
     
@@ -1238,7 +1652,7 @@ def result_show(agent):
     
     ax.plot(G, color='blue', linewidth=0.8)
     ax.legend(loc='lower right')
-    fig.savefig(f'./Model/{N_agent}/[S{N_stage}]f2.png')
+    fig.savefig(f'{path}/[S{N_stage}]f2.png')
     
     ## f3. 에피소드 당 소요 Step 수
     fig = plt.figure(num=3, figsize=(10,6), dpi=300)
@@ -1251,7 +1665,7 @@ def result_show(agent):
     ax.plot(agent.step_list, color='green', linewidth=0.8)
     ax.axhline(agent.step_truncate, color='red', linewidth=1.5, linestyle='--', label='Step Limit')
     ax.legend(loc='upper right')
-    fig.savefig(f'./Model/{N_agent}/[S{N_stage}]f3.png')
+    fig.savefig(f'{path}/[S{N_stage}]f3.png')
     
     ## f4. Loss의 변화
     fig = plt.figure(num=4, figsize=(10,6), dpi=300)
@@ -1264,31 +1678,57 @@ def result_show(agent):
     ax.plot(agent.loss_list, color='red', linewidth=0.8)
     ax.axvline(np.nonzero(agent.loss_list)[0][0], color='blue', linewidth=1.5, linestyle='--', label='Start Point')
     ax.legend(loc='upper right')
-    fig.savefig(f'./Model/{N_agent}/[S{N_stage}]f4.png')
+    fig.savefig(f'{path}/[S{N_stage}]f4.png')
     
     ## 그래프 출력
     plt.show()
     
 
 def result_record(agent):
-    # 1. State로 무엇을 받았는지
-    # 2. Model Summary
+    ## 경로 확인
+    path = f'{dir_main}/Model/{agent.name}'
+    check_dir(path)
+    
+    ## 파일 생성
+    f = open(f'{path}/Summary.txt', 'w')
+    
+    
+    ## 내용 생성
+    lines = []
+    
+    # 1. Model Summary
+    
+    
+    # 2. State로 무엇을 받았는지
+    lines.append('#2. State Type \n')
+    lines.append(f'{agent.env.state_type} \n')
+    
+    # 3. Stage number (stage에 관한 정보)
+    lines.append('#3. Stage Number \n')
+    #lines.
+    
     # 3. G_list
     # 4. step_list
     # 5. loss 변화
-    # 6. Stage number (stage에 관한 정보)
+    
     # 7. Grid size
     # 8. episode에 얻을 수 있는 이론상 최고 점수
     # 9. episode의 이론상 최소 step(opt)
     # 9-2. episode의 subopt step
-    path = f'./Model/{agent.name}'
-    check_dir(path)
+    
+    ## 파일 작성 및 닫기
+    for line in lines:
+        f.write(line)
+    f.close()
+    
+
+
+
     data = np.array([agent.G_list, agent.step_list, agent.loss_list]).transpose()
     np.savetxt(f'{path}/[S{agent.env.stage_type}]Summary.txt', data, fmt=('%4d','%4d','%4.2f'))
 
 
 #%% Play 함수
-
 ## Human
 def play_human(env_render='human', env_stage=0, env_grid=(9,7)):
     global env
@@ -1335,6 +1775,12 @@ def play_human(env_render='human', env_stage=0, env_grid=(9,7)):
 def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='onehot',
                model_name='DQN', model_ST=500, model_EL=1000, model_ED=0.998,
                play_type='save'):
+    """
+    play_type
+    - save
+    - load
+    - continue : 기존 모델을 로드하고 이어서 학습
+    """
     global DV
     global env
     global agent
@@ -1344,15 +1790,25 @@ def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='oneho
     
     # 환경 구성
     env = GCEnv(render_mode=env_render, stage_type=env_stage, grid_num=env_grid, state_type=env_state)
+    model_type = f'[S{env_stage}][{env_state}]'
+    model_path = f'{dir_main}/Model/{model_name}'
 
-    # DQN
+    # Set model
     if (model_name=='DQN'):
-        agent = Agent_DQN(env=env, step_truncate=model_ST, episode_limit=model_EL, epsilon_decay=model_ED)
-        # model load
-        if (play_type=='load'):
-            model_type = f'[S{env_stage}][{env_state}]'
-            agent.net_q = torch.load(f'./Model/DQN/{model_type}net_Q(all).pt')
-            agent.net_q_target = torch.load(f'./Model/DQN/{model_type}net_Q(all).pt')
+        agent = Agent_DQN(env=env, step_truncate=model_ST, 
+                          episode_limit=model_EL, epsilon_decay=model_ED)
+        if (play_type=='load' or play_type=='continue'):
+            agent.net_Q = torch.load(f'{model_path}/{model_type}net_Q(all).pt')
+            agent.net_Q_target = torch.load(f'{model_path}/{model_type}net_Q(all).pt')
+    elif (model_name=='DDQN'):
+        agent = Agent_DDQN(env=env, step_truncate=model_ST, 
+                           episode_limit=model_EL, epsilon_decay=model_ED)
+        if (play_type=='load' or play_type=='continue'):
+            agent.net_Q_outer = torch.load(f'{model_path}/{model_type}net_Q(all).pt')
+            agent.net_Q_inner = torch.load(f'{model_path}/{model_type}net_Q(all).pt')
+    
+    if (play_type=='load'):
+        agent.epsilon = 0
     
     # 모델 학습
     agent.train(mode_trace=True)
@@ -1368,6 +1824,6 @@ def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='oneho
 
 # play_human(env_render='human', env_stage=0, env_grid=(9,7))
 
-play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='semiconv_ego',
-            model_name='DQN', model_ST=500, model_EL=1000, model_ED=0.995,
-            play_type='save')
+play_agent(env_render='human', env_stage=1, env_grid=(9,7), env_state='semiconv_ego',
+            model_name='DDQN', model_ST=500, model_EL=1000, model_ED=0.995,
+            play_type='load')
