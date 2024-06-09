@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import random
 from collections import deque
+import itertools
 
 import torch
 import torch.nn as nn
@@ -77,6 +78,10 @@ class GCEnv(gym.Env):
         # 렌더 활성화
         self.render_initialize()
         
+        # 스테이지 정보
+        self.optimal_step = [] # Reset마다 해당 스테이지에서 가능한 가장 짧은 step을 기록
+        self.optimal_order = [] # Reset마다 해당 스테이지에서 가능한 가장 짧은 path를 기록
+        
         ## Action 유형 선언
         self.action_space = spaces.Discrete(5) # 0:pick, (1,2,3,4):move
         self.action = -1
@@ -87,11 +92,14 @@ class GCEnv(gym.Env):
             self.state_space = (2*grid_num[0]*grid_num[1]+6)*2
         elif (state_type == 'semiconv'):
             self.state_space = (grid_num[0]*grid_num[1]+6)*2
-            self.kernel = filter_gauss2d(sigma=1)
+            self.kernel = filter_gauss2d(sigma=0.7)
         elif (state_type == 'semiconv_ego'):
-            self.player_sight = 3
+            self.player_sight = 5
             self.state_space = 6+((2*self.player_sight+1)**2)*2
-            self.kernel = filter_gauss2d(sigma=1)
+            self.kernel = filter_gauss2d(sigma=0.7)
+        elif (state_type == 'ego'):
+            self.player_sight = 5
+            self.state_space = 6+((2*self.player_sight+1)**2)*2
         elif (state_type == 'conv'):
             self.state_space = 40
             self.resizer = T.Compose(
@@ -103,6 +111,7 @@ class GCEnv(gym.Env):
         self.M_map_player = self.FS_map_player()
         self.M_map_item = self.FS_map_item()
         self.M_inv_info = self.FS_inv_info()
+        self.M_pos_player = self.G_player.position
         
         ## Reward 설정
         self.R_rule = reward_set[0] # composition
@@ -114,14 +123,14 @@ class GCEnv(gym.Env):
     
     ## step
     def step(self, action):
-        # 액션 이전, 플레이어 인벤토리 정보
+        # 액션 이전, 플레이어 정보
         inv_before = self.G_player.inventory_num
         
         # 플레이어 액션
         self.action = action
         self.G_player.action(self.action)
         
-        # 액션 이후, 플레이어 인벤토리 정보
+        # 액션 이후, 플레이어 정보
         inv_after = self.G_player.inventory_num
         
         # State 구성
@@ -142,7 +151,7 @@ class GCEnv(gym.Env):
             self.done = False
         elif (inv_after > inv_before): # 아이템 수집 시
             if (inv_after == 3):
-                self.reward_check() # 아이템 모두 모은 경우 인벤토리 검사
+                self.FR_inv_check() # 아이템 모두 모은 경우 인벤토리 검사
                 self.done = True
             else: 
                 self.reward = self.R_item # 아직 아이템을 모두 모으지 못한 경우
@@ -165,6 +174,11 @@ class GCEnv(gym.Env):
         
         # State
         self.observation = self.FS_observe(output_type='flatten')
+        
+        # 스테이지 정보 기록
+        opt_step, opt_order = self.FI_shortest()
+        self.optimal_step.append(opt_step)
+        self.optimal_order.append(opt_order)
         
         return self.observation
     
@@ -189,12 +203,22 @@ class GCEnv(gym.Env):
             O = [[M_minimap, self.M_inv_info], [minimap, inv_info]]
         elif (self.state_type == 'semiconv_ego'):
             ps = self.player_sight
+            M_pp = self.M_pos_player
             pp = self.G_player.position
             M_minimap = np.pad(self.M_map_item, ((ps,)*2,)*2, 'constant', constant_values=0)
             M_minimap = conv2d(M_minimap, self.kernel, scaling=10)
+            M_map_sight = M_minimap[M_pp[0]:M_pp[0]+2*ps+1, M_pp[1]:M_pp[1]+2*ps+1]
             minimap = np.pad(map_item, ((ps,)*2,)*2, 'constant', constant_values=0)
             minimap = conv2d(minimap, self.kernel, scaling=10)
-            M_map_sight = M_minimap[pp[0]:pp[0]+2*ps+1, pp[1]:pp[1]+2*ps+1]
+            map_sight = minimap[pp[0]:pp[0]+2*ps+1, pp[1]:pp[1]+2*ps+1]
+            O = [M_map_sight, map_sight, inv_info]
+        elif (self.state_type == 'ego'):
+            ps = self.player_sight
+            M_pp = self.M_pos_player
+            pp = self.G_player.position
+            M_minimap = pseudo_conv2d(image=self.M_map_item, sigma=0.6, padding=ps, scaling=10)
+            M_map_sight = M_minimap[M_pp[0]:M_pp[0]+2*ps+1, M_pp[1]:M_pp[1]+2*ps+1]
+            minimap = pseudo_conv2d(image=map_item, sigma=0.7, padding=ps, scaling=10)
             map_sight = minimap[pp[0]:pp[0]+2*ps+1, pp[1]:pp[1]+2*ps+1]
             O = [M_map_sight, map_sight, inv_info]
         elif (self.state_type == 'conv'):
@@ -208,6 +232,7 @@ class GCEnv(gym.Env):
         self.M_map_player = map_player.copy()
         self.M_map_item = map_item.copy()
         self.M_inv_info = inv_info.copy()
+        self.M_pos_player = self.G_player.position # tuple이기 때문에 copy를 쓰지 않아도 무방.
         
         # Output Type
         if (output_type == 'flatten'):
@@ -277,8 +302,9 @@ class GCEnv(gym.Env):
         return inv_info
     
     
-    ## 인벤토리 체크
-    def reward_check(self):
+    ## (Function of Reward) Reward와 관련된 함수
+    # 인벤토리 체크
+    def FR_inv_check(self):
         """
         인벤토리에 있는 각 아이템의 content를 곱하면, 아래와 같은 숫자를 반환할 것이다.
         
@@ -317,6 +343,46 @@ class GCEnv(gym.Env):
                 geo_mean *= distance
         geo_mean = geo_mean ** (1/num_item)
         return geo_mean
+    
+    
+    ## (Function of Info) Info와 관련된 함수
+    # 아이템 이론상 가능한 최단 step 계산
+    # 주의 : 수집 액션 또한 step에 포함하여 계산
+    def FI_shortest(self):
+        # 플레이어 위치 저장
+        pos_P = self.G_player.position
+        
+        # 아이템 위치 저장
+        pos_I = []
+        for item in self.G_item:
+            pos_I.append(item.position)
+        num_I = len(pos_I) # 총 아이템 개수
+        
+        # 플레이어-아이템 거리 행렬
+        D = np.zeros(num_I)
+        for idx_I in range(num_I):
+            D[idx_I] = abs(pos_P[0]-pos_I[idx_I][0]) + abs(pos_P[1]-pos_I[idx_I][1])
+        
+        # 아이템 간 거리 행렬
+        L = np.zeros((num_I,num_I))
+        for idx_I in itertools.permutations(range(num_I), 2):
+            L[idx_I[0], idx_I[1]] = abs(pos_I[idx_I[0]][0]-pos_I[idx_I[1]][0]) + abs(pos_I[idx_I[0]][1]-pos_I[idx_I[1]][1])
+        
+        # 최단 step 계산
+        # 전체 아이템 중 3개를 고르고, 해당 아이템들을 수집할 수 있는 최단 step을 계산하는 방식
+        shortest_step = 10000
+        for idx_tri in itertools.combinations(range(num_I), 3):
+            perimeter = L[idx_tri[0], idx_tri[1]] + L[idx_tri[1], idx_tri[2]] + L[idx_tri[0], idx_tri[2]]
+            for idx_line in itertools.permutations(idx_tri, 2):
+                path_step = D[idx_line[0]] + perimeter - L[idx_line[0], idx_line[1]]
+                if path_step < shortest_step:
+                    shortest_step = path_step
+                    shortest_order = (idx_line[0], (set(idx_tri)^set(idx_line)).pop(), idx_line[1])
+        
+        return shortest_step, shortest_order
+                    
+    # 최적화 경로 step 계산
+    # 주의 : stage 3에서만 유효한 함수
     
     
     ## 렌더 함수
@@ -678,6 +744,18 @@ def conv2d(image, kernel, padding=2, scaling=1):
     for x in range(I_wh[0]-K_wh[0]+1):
         for y in range(I_wh[1]-K_wh[1]+1):
             feature[x,y] = scaling * np.sum(image[x:x+K_wh[0],y:y+K_wh[1]]*kernel)
+    return feature
+
+
+# 개선된 가우시안 컨볼루션
+def pseudo_conv2d(image, sigma=1, padding=2, scaling=1):
+    image_pad = np.pad(image, ((padding,)*2,)*2, 'constant', constant_values=0)
+    feature = np.zeros(image_pad.shape)
+    idx = np.nonzero(image_pad)
+    for x in range(image_pad.shape[0]):
+        for y in range(image_pad.shape[1]):
+            for i in range(len(idx[0])):
+                feature[x,y] += np.exp(-((x-idx[0][i])**2+(y-idx[1][i])**2)/(2*(sigma**2)))/(2*np.pi*(sigma**2))
     return feature
 
 
@@ -1685,6 +1763,7 @@ def result_show(agent):
     ax.set_xlabel('Episode')
     ax.set_ylabel('Steps')
     
+    ax.plot(agent.env.optimal_step, color='blue', linewidth=0.8, linestyle='--', label='Step Optimal')
     ax.plot(agent.step_list, color='green', linewidth=0.8)
     ax.axhline(agent.step_truncate, color='red', linewidth=1.5, linestyle='--', label='Step Limit')
     ax.legend(loc='upper right')
@@ -1715,7 +1794,6 @@ def result_record(agent):
     ## 파일 생성
     f = open(f'{path}/Summary.txt', 'w')
     
-    
     ## 내용 생성
     lines = []
     
@@ -1730,11 +1808,15 @@ def result_record(agent):
     lines.append('#3. Stage Number \n')
     #lines.
     
+    # 4. Grid size
+    lines.append('#4. Gid Size \n')
+    lines.append(f'{agent.env.grid_num} \n')
+    
     # 3. G_list
     # 4. step_list
     # 5. loss 변화
     
-    # 7. Grid size
+    
     # 8. episode에 얻을 수 있는 이론상 최고 점수
     # 9. episode의 이론상 최소 step(opt)
     # 9-2. episode의 subopt step
@@ -1848,6 +1930,6 @@ def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='oneho
 
 # play_human(env_render='human', env_stage=0, env_grid=(9,7))
 
-play_agent(env_render='human', env_stage=2, env_grid=(9,7), env_state='semiconv_ego',
-            model_name='DDQN', model_ST=500, model_EL=100, model_ED=0.999,
+play_agent(env_render='agent', env_stage=2, env_grid=(9,7), env_state='ego',
+            model_name='DDQN', model_ST=500, model_EL=50, model_ED=0.999,
             play_type='load')
