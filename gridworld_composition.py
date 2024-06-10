@@ -73,16 +73,19 @@ class GCEnv(gym.Env):
         self.grid_num = grid_num # 맵의 크기 (나중에 고칠 것)
         self.stage_type = stage_type # 스테이지 타입
         
+        # 스테이지 정보
+        self.optimal_step = [] # Reset마다 해당 스테이지에서 가능한 가장 짧은 step을 기록
+        self.optimal_order = [] # Reset마다 해당 스테이지에서 가능한 가장 짧은 path를 기록
+        if (stage_type==3):
+            self.subopt_step = [] # Reset마다 해당 스테이지에서 편향 step을 기록
+            self.subopt_order = [] # Reset마다 해당 스테이지에서 편향 path를 기록
+        
         # 내부 클래스 선언
         self.G_player = self.Player(self, (self.grid_num[0]//2,self.grid_num[1]//2)) # Player
         self.G_item = self.ItemCreator(self.stage_type) # Item
         
         # 렌더 활성화
         self.render_initialize()
-        
-        # 스테이지 정보
-        self.optimal_step = [] # Reset마다 해당 스테이지에서 가능한 가장 짧은 step을 기록
-        self.optimal_order = [] # Reset마다 해당 스테이지에서 가능한 가장 짧은 path를 기록
         
         ## Action 유형 선언
         self.action_space = spaces.Discrete(5) # 0:pick, (1,2,3,4):move
@@ -172,7 +175,10 @@ class GCEnv(gym.Env):
     def reset(self):
         # Reset
         self.G_item = self.ItemCreator(self.stage_type) # 아이템 생성 (나중에 고칠 것)
-        self.G_player.reset()
+        if (self.stage_type != 3):
+            self.G_player.reset()
+        else:
+            self.G_player.reset((self.grid_num[0]//2,self.grid_num[1]//2))
         self.render_reset()
         self.done = False
         
@@ -632,29 +638,77 @@ class GCEnv(gym.Env):
 
     ## 아이템 생성기
     def ItemCreator(self, stage_type):
-        if (stage_type==0):
+        if (stage_type==0): # 고정, rule
             ItemSet = [self.Item(self,(1,1),(0,0)), 
                        self.Item(self,(2,2),(3,2)), 
                        self.Item(self,(3,3),(4,6)), 
                        self.Item(self,(2,1),(7,1)), 
                        self.Item(self,(2,3),(6,1))]
-        elif (stage_type==1):
+        elif (stage_type==1): # 랜덤, rule
             position_list = random.sample(range(self.grid_num[0]*self.grid_num[1]),5)
             content_list = [(1,1),(2,2),(3,3),(2,1),(2,3)]
             ItemSet = []
             for idx in range(5):
                 pos = (position_list[idx]%self.grid_num[0], position_list[idx]//self.grid_num[0])
                 ItemSet.append(self.Item(self,content_list[idx],pos))
-        elif (stage_type==2):
+        elif (stage_type==2): # 랜덤, no rule
             position_list = random.sample(range(self.grid_num[0]*self.grid_num[1]),5)
             ItemSet = []
             for idx in range(5):
                 pos = (position_list[idx]%self.grid_num[0], position_list[idx]//self.grid_num[0])
                 ItemSet.append(self.Item(self,(1,1),pos))
-        elif (stage_type==3):
-            # First, two Item position random set (B,C)
-            position_list = random.sample(range(self.grid_num[0]*self.grid_num[1]),2)
-            
+        elif (stage_type==3): # Subopt vs opt stage
+            # 주의 : 적어도 5x5 grid 이상만 사용할 것
+            # 주의 : 플레이어는 항상 정중앙 스폰 (subopt 배치 확률을 높이기 위함)
+            available_A = False
+            G_W = self.grid_num[0]//2 # Grid half width
+            G_H = self.grid_num[1]//2 # Grid half height
+            # (Cond 1. D_A<D_B<D_C)
+            # (Cond 2. L_max = L_A)
+            # (Cond 3. L_max-L_mid > D_B-D_A)
+            while not available_A:
+                # First, Set the position of (B,C) according to agent position.
+                D_B = random.randint(2, G_W+G_H-1) # Agent, Item B 사이 거리
+                D_C = random.randint(D_B, G_W+G_H) # D_C가 D_B보다 더 길도록 설정 (Cond 1)
+                Area_BC = random.sample(tuple(itertools.permutations([(1,1),(-1,1),(-1,-1),(1,-1)],2)), 1)[0] # B,C가 존재할 구역 선정
+                B_x = random.randint(max(D_B-G_H, 0), min(D_B, G_W))
+                B_y = D_B - B_x
+                C_x = random.randint(max(D_C-G_H, 0), min(D_C, G_W))
+                C_y = D_C - C_x
+                B_pos = (G_W+B_x*Area_BC[0][0], G_H+B_y*Area_BC[0][1])
+                C_pos = (G_W+C_x*Area_BC[1][0], G_H+C_y*Area_BC[1][1])
+                
+                # Second, Set the position of A according to Agent, B, C position.
+                for D_A in range(1, D_B): # (Cond 1)
+                    for A_x in range(0, min(D_A, G_W)+1):
+                        A_y = D_A - A_x
+                        for Area_A in [(1,1),(-1,1),(-1,-1),(1,-1)]:
+                            A_pos = (G_W+A_x*Area_A[0], G_H+A_y*Area_A[1])
+                            L_A = abs(B_pos[0]-C_pos[0]) + abs(B_pos[1]-C_pos[1]) # B, C 사이 거리 (A의 대변)
+                            L_B = abs(A_pos[0]-C_pos[0]) + abs(A_pos[1]-C_pos[1]) # A, C 사이 거리 (B의 대변)
+                            L_C = abs(A_pos[0]-B_pos[0]) + abs(A_pos[1]-B_pos[1]) # A, B 사이 거리 (C의 대변)
+                            if (max(L_A,L_B,L_C)==L_A):
+                                available_A = True
+                                if (min(L_B,L_C)==L_B) and (D_A+L_A > D_B+L_C): # (Cond 3)
+                                    self.subopt_order.append((0,2,1)) # subopt : A-C-B
+                                    self.subopt_step.append(D_A+L_B+L_A+3) # (Cond 3)
+                                elif (min(L_B,L_C==L_C)) and (D_A+L_A > D_B+L_B): 
+                                    self.subopt_order.append((0,1,2)) # subopt : A-B-C
+                                    self.subopt_step.append(D_A+L_C+L_A+3)
+                                break
+                        if (available_A):
+                            break
+                    if (available_A):
+                        break
+            ItemSet = [self.Item(self,(1,1),A_pos), 
+                       self.Item(self,(1,1),B_pos), 
+                       self.Item(self,(1,1),C_pos)]
+        elif (stage_type==4):
+            ItemSet = [self.Item(self,(1,1),(8,0)), 
+                       self.Item(self,(1,1),(7,0)), 
+                       self.Item(self,(1,1),(7,1)), 
+                       self.Item(self,(1,1),(6,2)), 
+                       self.Item(self,(1,1),(6,1))]
         return ItemSet
     
     
@@ -1796,7 +1850,6 @@ def result_show(agent):
     
     """
     f2에 추가할 것
-    1. compos rule 만족했는지 여부를 point 혹은 구간 음영으로 나타내보기
     2. 완전 랜덤 policy일 때의 score를 baseline으로 그리기
     """
     ## f2. 에피소드 당 획득한 총 Reward
@@ -1850,6 +1903,8 @@ def result_show(agent):
     ax.set_ylabel('Steps')
     
     ax.plot(agent.env.optimal_step, color='blue', linewidth=0.8, linestyle='--', label='Step Optimal')
+    if (agent.env.stage_type==3):
+        ax.plot(agent.env.subopt_step, color='skyblue', linewidth=0.8, linestyle='-.', label='Step Suboptimal')
     ax.plot(agent.step_list, color='green', linewidth=0.8)
     ax.axhline(agent.step_truncate, color='red', linewidth=1.5, linestyle='--', label='Step Limit')
     ax.legend(loc='upper right')
@@ -1926,7 +1981,11 @@ def result_record(agent):
         pickle.dump(agent.loss_list, f)
     # 4. optimal step
     with open(f'{path}/[S{N_stage}]list_optimal.pkl', 'wb') as f:
-        pickle.dump(agent.env.optimal_step, f)
+        pickle.dump(env.optimal_step, f)
+    # 4-2. subopt step
+    if (env.stage_type==3):
+        with open(f'{path}/[S{N_stage}]list_subopt.pkl', 'wb') as f:
+            pickle.dump(env.subopt_step, f)
 
 
 #%% Play 함수
@@ -2036,8 +2095,8 @@ def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='oneho
 
 #%% 플레이
 
-# play_human(env_render='human', env_stage=0, env_grid=(9,7))
+# play_human(env_render='human', env_stage=4, env_grid=(9,7))
 
-play_agent(env_render='human', env_stage=0, env_grid=(9,7), env_state='ego',
-          model_name='DDQ', model_ST=500, model_EL=1000, model_ED=0.995,
+play_agent(env_render='agent', env_stage=3, env_grid=(9,7), env_state='ego',
+          model_name='DDQN', model_ST=1000, model_EL=3000, model_ED=0.999,
           play_type='save')
