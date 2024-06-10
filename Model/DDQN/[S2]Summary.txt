@@ -1,9 +1,9 @@
 #1. Model Summary 
 Gamma : 0.99 
 Alpha : 0.0005 
-Epsilon range : (0.05, 1) 
-Epsilon decay (per episode) : 0.995 
-Episode Limit : 1000 
+Epsilon range : (0.05, 1)
+Epsilon decay (per episode) : 0.999 
+Episode Limit : 3000 
 Step Limit : 500 
 
 #2. State Type 

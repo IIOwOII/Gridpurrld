@@ -7,7 +7,7 @@ Episode Limit : 1000
 Step Limit : 500 
 
 #2. State Type 
-State : ego 
+State : onehot 
 
 #3. Grid Size 
 Size : (9, 7) 
