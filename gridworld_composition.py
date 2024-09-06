@@ -82,7 +82,7 @@ class GCEnv(gym.Env):
         
         # 내부 클래스 선언
         self.G_player = self.Player(self, (self.grid_num[0]//2,self.grid_num[1]//2)) # Player
-        self.G_item = self.ItemCreator(self.stage_type) # Item
+        self.G_item = self.ItemCreator() # Item
         
         # 렌더 활성화
         self.render_initialize()
@@ -637,13 +637,14 @@ class GCEnv(gym.Env):
         
 
     ## 아이템 생성기
-    def ItemCreator(self, stage_type):
+    def ItemCreator(self, stage_type=0):
         if (stage_type==0): # 고정, rule
             ItemSet = [self.Item(self,(1,1),(0,0)), 
                        self.Item(self,(2,2),(3,2)), 
                        self.Item(self,(3,3),(4,6)), 
                        self.Item(self,(2,1),(7,1)), 
                        self.Item(self,(2,3),(6,1))]
+            
         elif (stage_type==1): # 랜덤, rule
             position_list = random.sample(range(self.grid_num[0]*self.grid_num[1]),5)
             content_list = [(1,1),(2,2),(3,3),(2,1),(2,3)]
@@ -651,21 +652,24 @@ class GCEnv(gym.Env):
             for idx in range(5):
                 pos = (position_list[idx]%self.grid_num[0], position_list[idx]//self.grid_num[0])
                 ItemSet.append(self.Item(self,content_list[idx],pos))
+                
         elif (stage_type==2): # 랜덤, no rule
             position_list = random.sample(range(self.grid_num[0]*self.grid_num[1]),5)
             ItemSet = []
             for idx in range(5):
                 pos = (position_list[idx]%self.grid_num[0], position_list[idx]//self.grid_num[0])
                 ItemSet.append(self.Item(self,(1,1),pos))
+                
         elif (stage_type==3): # Subopt vs opt stage
             # 주의 : 적어도 5x5 grid 이상만 사용할 것
             # 주의 : 플레이어는 항상 정중앙 스폰 (subopt 배치 확률을 높이기 위함)
+            # order : opt는 언제나 B-A-C, subopt는 경우에 따라 A-B-C, A-C-B가 나온다.
             available_A = False
             G_W = self.grid_num[0]//2 # Grid half width
             G_H = self.grid_num[1]//2 # Grid half height
-            # (Cond 1. D_A<D_B<D_C)
-            # (Cond 2. L_max = L_A)
-            # (Cond 3. L_max-L_mid > D_B-D_A)
+            
+            # (Cond 1. D_A<D_B<D_C) [subopt가 유발될 조건]
+            # (Cond 2. D_B-D_A < L_A-L_mid) [opt가 subopt보다 짧을 조건]
             while not available_A:
                 # First, Set the position of (B,C) according to agent position.
                 D_B = random.randint(2, G_W+G_H-1) # Agent, Item B 사이 거리
@@ -687,22 +691,25 @@ class GCEnv(gym.Env):
                             L_A = abs(B_pos[0]-C_pos[0]) + abs(B_pos[1]-C_pos[1]) # B, C 사이 거리 (A의 대변)
                             L_B = abs(A_pos[0]-C_pos[0]) + abs(A_pos[1]-C_pos[1]) # A, C 사이 거리 (B의 대변)
                             L_C = abs(A_pos[0]-B_pos[0]) + abs(A_pos[1]-B_pos[1]) # A, B 사이 거리 (C의 대변)
-                            if (max(L_A,L_B,L_C)==L_A):
+                            if (D_B-D_A < L_A-L_B) and (L_C < L_B): # (Cond 2-1) subopt : A-B-C
+                                self.subopt_order.append((0,1,2))
+                                self.subopt_step.append(D_A+L_C+L_A+3)
                                 available_A = True
-                                if (min(L_B,L_C)==L_B) and (D_A+L_A > D_B+L_C): # (Cond 3)
-                                    self.subopt_order.append((0,2,1)) # subopt : A-C-B
-                                    self.subopt_step.append(D_A+L_B+L_A+3) # (Cond 3)
-                                elif (min(L_B,L_C==L_C)) and (D_A+L_A > D_B+L_B): 
-                                    self.subopt_order.append((0,1,2)) # subopt : A-B-C
-                                    self.subopt_step.append(D_A+L_C+L_A+3)
+                            elif (D_B-D_A < L_A-L_C) and (L_B < L_C): # (Cond 2-2) subopt : A-C-B
+                                self.subopt_order.append((0,2,1))
+                                self.subopt_step.append(D_A+L_B+L_A+3)
+                                available_A = True
+                            if (available_A):
                                 break
                         if (available_A):
                             break
                     if (available_A):
                         break
+                    
             ItemSet = [self.Item(self,(1,1),A_pos), 
                        self.Item(self,(1,1),B_pos), 
                        self.Item(self,(1,1),C_pos)]
+            
         elif (stage_type==4):
             ItemSet = [self.Item(self,(1,1),(8,0)), 
                        self.Item(self,(1,1),(7,0)), 
@@ -818,6 +825,7 @@ def pseudo_conv2d(image, sigma=1, padding=2, scaling=1):
         for y in range(image_pad.shape[1]):
             for i in range(len(idx[0])):
                 feature[x,y] += np.exp(-((x-idx[0][i])**2+(y-idx[1][i])**2)/(2*(sigma**2)))/(2*np.pi*(sigma**2))
+    feature *= scaling
     return feature
 
 
@@ -2097,6 +2105,6 @@ def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='oneho
 
 # play_human(env_render='human', env_stage=4, env_grid=(9,7))
 
-play_agent(env_render='agent', env_stage=3, env_grid=(9,7), env_state='ego',
-          model_name='DDQN', model_ST=1000, model_EL=3000, model_ED=0.999,
-          play_type='save')
+play_agent(env_render='human', env_stage=1, env_grid=(9,7), env_state='ego',
+          model_name='DDQN', model_ST=500, model_EL=2000, model_ED=0.999,
+          play_type='load')
