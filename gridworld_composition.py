@@ -1,7 +1,6 @@
 #%% Info
 # version : python 3.9
 import os
-from pynput import keyboard
 
 import gym
 from gym import spaces
@@ -167,6 +166,10 @@ class GCEnv(gym.Env):
         else: # 버그 색출
             self.close()
             raise SystemExit('Cannot find action command')
+        
+        for event in pg.event.get():
+            if event.type == pg.QUIT: #game의 event type이 QUIT 명령이라면
+                pg.quit()
         
         return self.observation, self.reward, self.done, self.info
     
@@ -742,28 +745,6 @@ def load_sound(file):
     except pg.error:
         print(f"Warning, unable to load, {file}")
     return None
-
-def key_press(key):
-    global key_switch, act
-    if not key_switch:
-        if key == keyboard.Key.space:
-            act = 0
-        elif key == keyboard.Key.right:
-            act = 1
-        elif key == keyboard.Key.up:
-            act = 2
-        elif key == keyboard.Key.left:
-            act = 3
-        elif key == keyboard.Key.down:
-            act = 4
-        key_switch = True
-
-def key_release(key):
-    global key_switch, G_switch, act
-    key_switch = False
-    if key == keyboard.Key.esc:
-        G_switch = False
-        return False
 
 
 #%% 유틸 함수
@@ -2000,17 +1981,12 @@ def result_record(agent):
 ## Human
 def play_human(env_render='human', env_stage=0, env_grid=(9,7)):
     global env
-    global key_switch
     global act
     
     G_switch = True
-    key_switch = False
     act = -1
 
-    episode_limit = int(input('플레이 할 에피소드 수를 입력(step): '))
-
-    listener = keyboard.Listener(on_press=key_press, on_release=key_release)
-    listener.start()
+    episode_limit = int(input('플레이 할 에피소드 수를 입력: '))
 
     # 환경 구성
     env = GCEnv(render_mode=env_render, stage_type=env_stage, grid_num=env_grid)
@@ -2023,6 +1999,21 @@ def play_human(env_render='human', env_stage=0, env_grid=(9,7)):
         env.reset()
         env.render()
         while True:
+            for event in pg.event.get():
+                if event.type == pg.QUIT:
+                    env.close()
+                    break
+                if event.type == pg.KEYDOWN:
+                    if event.key == pg.K_SPACE:
+                        act = 0
+                    elif event.key == pg.K_RIGHT:
+                        act = 1
+                    elif event.key == pg.K_UP:
+                        act = 2
+                    elif event.key == pg.K_LEFT:
+                        act = 3
+                    elif event.key == pg.K_DOWN:
+                        act = 4
             if act != -1:
                 S, R, D, I = env.step(act)
                 env.render()
@@ -2035,7 +2026,6 @@ def play_human(env_render='human', env_stage=0, env_grid=(9,7)):
         episode += 1
         step = 0
     
-    del listener
     env.close()
 
 
@@ -2103,8 +2093,8 @@ def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='oneho
 
 #%% 플레이
 
-# play_human(env_render='human', env_stage=4, env_grid=(9,7))
+play_human(env_render='human', env_stage=1, env_grid=(9,7))
 
-play_agent(env_render='human', env_stage=1, env_grid=(9,7), env_state='ego',
-          model_name='DDQN', model_ST=500, model_EL=2000, model_ED=0.999,
-          play_type='load')
+# play_agent(env_render='human', env_stage=1, env_grid=(9,7), env_state='ego',
+#           model_name='DDQN', model_ST=500, model_EL=2000, model_ED=0.999,
+#           play_type='load')
