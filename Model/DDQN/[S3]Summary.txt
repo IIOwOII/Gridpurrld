@@ -1,0 +1,17 @@
+#1. Model Summary 
+Gamma : 0.99 
+Alpha : 0.0005 
+Epsilon range : (0.05, 1) 
+Epsilon decay (per episode) : 0.9995 
+Episode Limit : 10000 
+Step Limit : 1000 
+
+#2. State Type 
+State : ego 
+
+#3. Grid Size 
+Size : (9, 9) 
+
+#4. Reward Set 
+(rule, full, item, step[scale], vain) = (3.0, 2.0, 1.0, -0.01, -0.02) 
+
