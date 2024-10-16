@@ -37,8 +37,8 @@ C_lightgreen = (170,240,180)
 
 #%%
 class GCEnv(gym.Env):
-    def __init__(self, render_mode=None, stage_type=0, grid_num=(9,7),
-                 reward_set=(3.,2.,1.,-0.01,-0.02), state_type='onehot'):
+    def __init__(self, render_mode=None, stage_type=0, grid_num=(9,9), auto_collect=False,
+                 reward_set=(3.,1.,1.,-0.01,-0.02), state_type='onehot'):
         """
         render_mode
         - human : full play screen
@@ -75,9 +75,6 @@ class GCEnv(gym.Env):
         # 스테이지 정보
         self.optimal_step = [] # Reset마다 해당 스테이지에서 가능한 가장 짧은 step을 기록
         self.optimal_order = [] # Reset마다 해당 스테이지에서 가능한 가장 짧은 path를 기록
-        if (stage_type==3):
-            self.subopt_step = [] # Reset마다 해당 스테이지에서 편향 step을 기록
-            self.subopt_order = [] # Reset마다 해당 스테이지에서 편향 path를 기록
         
         # 내부 클래스 선언
         self.G_player = self.Player(self, (self.grid_num[0]//2,self.grid_num[1]//2)) # Player
@@ -87,23 +84,23 @@ class GCEnv(gym.Env):
         self.render_initialize()
         
         ## Action 유형 선언
-        self.action_space = spaces.Discrete(5) # 0:pick, (1,2,3,4):move
+        self.auto_collect = auto_collect
+        if auto_collect:
+            self.action_space = spaces.Discrete(4) # (0,1,2,3) + 1 :move
+        else:
+            self.action_space = spaces.Discrete(5) # 0:pick, (1,2,3,4):move
         self.action = -1
         
         ## State 크기 정보 (obs와 함께 직접 수정해야 함)
         self.state_type = state_type
         if (state_type == 'onehot'):
             self.state_space = (2*grid_num[0]*grid_num[1]+6)*2
-        elif (state_type == 'semiconv'):
-            self.state_space = (grid_num[0]*grid_num[1]+6)*2
-            self.kernel = filter_gauss2d(sigma=0.7)
-        elif (state_type == 'semiconv_ego'):
-            self.player_sight = 5
-            self.state_space = 6+((2*self.player_sight+1)**2)*2
-            self.kernel = filter_gauss2d(sigma=0.7)
         elif (state_type == 'ego'):
             self.player_sight = 5
-            self.state_space = 6+((2*self.player_sight+1)**2)*2
+            self.state_space = 6+(2*self.player_sight+1)**2
+        elif (state_type == 'allo'): # item이 3개인 경우만 가능
+            self.item_sight = 5
+            self.state_space = 6+((2*self.item_sight+1)**2)*3
         elif (state_type == 'conv'):
             self.state_space = 40
             self.resizer = T.Compose(
@@ -131,7 +128,10 @@ class GCEnv(gym.Env):
         inv_before = self.G_player.inventory_num
         
         # 플레이어 액션
-        self.action = action
+        if self.auto_collect:
+            self.action = action + 1
+        else:
+            self.action = action
         self.G_player.action(self.action)
         
         # 액션 이후, 플레이어 정보
@@ -167,9 +167,10 @@ class GCEnv(gym.Env):
             self.close()
             raise SystemExit('Cannot find action command')
         
-        for event in pg.event.get():
-            if event.type == pg.QUIT: #game의 event type이 QUIT 명령이라면
-                pg.quit()
+        if self.render_mode == 'human':
+            for event in pg.event.get():
+                if event.type == pg.QUIT: #game의 event type이 QUIT 명령이라면
+                    pg.quit()
         
         return self.observation, self.reward, self.done, self.info
     
@@ -178,10 +179,10 @@ class GCEnv(gym.Env):
     def reset(self):
         # Reset
         self.G_item = self.ItemCreator(self.stage_type) # 아이템 생성 (나중에 고칠 것)
-        if (self.stage_type != 3):
-            self.G_player.reset()
-        else:
+        if (self.stage_type == 3) or (self.stage_type == 4):
             self.G_player.reset((self.grid_num[0]//2,self.grid_num[1]//2))
+        else:
+            self.G_player.reset()
         self.render_reset()
         self.done = False
         
@@ -208,32 +209,24 @@ class GCEnv(gym.Env):
         if (self.state_type == 'onehot'):
             O = [[self.M_map_player, self.M_map_item, self.M_inv_info],
                  [map_player, map_item, inv_info]]
-        elif (self.state_type == 'semiconv'):
-            M_minimap = self.M_map_player + self.M_map_item
-            M_minimap = conv2d(M_minimap, self.kernel, scaling=10)
-            minimap = map_player + map_item
-            minimap = conv2d(minimap, self.kernel, scaling=10)
-            O = [[M_minimap, self.M_inv_info], [minimap, inv_info]]
-        elif (self.state_type == 'semiconv_ego'):
-            ps = self.player_sight
-            M_pp = self.M_pos_player
-            pp = self.G_player.position
-            M_minimap = np.pad(self.M_map_item, ((ps,)*2,)*2, 'constant', constant_values=0)
-            M_minimap = conv2d(M_minimap, self.kernel, scaling=10)
-            M_map_sight = M_minimap[M_pp[0]:M_pp[0]+2*ps+1, M_pp[1]:M_pp[1]+2*ps+1]
-            minimap = np.pad(map_item, ((ps,)*2,)*2, 'constant', constant_values=0)
-            minimap = conv2d(minimap, self.kernel, scaling=10)
-            map_sight = minimap[pp[0]:pp[0]+2*ps+1, pp[1]:pp[1]+2*ps+1]
-            O = [M_map_sight, map_sight, inv_info]
         elif (self.state_type == 'ego'):
             ps = self.player_sight
-            M_pp = self.M_pos_player
             pp = self.G_player.position
-            M_minimap = pseudo_conv2d(image=self.M_map_item, sigma=0.7, padding=ps, scaling=10)
-            M_map_sight = M_minimap[M_pp[0]:M_pp[0]+2*ps+1, M_pp[1]:M_pp[1]+2*ps+1]
             minimap = pseudo_conv2d(image=map_item, sigma=0.7, padding=ps, scaling=10)
             map_sight = minimap[pp[0]:pp[0]+2*ps+1, pp[1]:pp[1]+2*ps+1]
-            O = [M_map_sight, map_sight, inv_info]
+            O = [map_sight, inv_info]
+        elif (self.state_type == 'allo'):
+            ps = self.item_sight
+            minimap = pseudo_conv2d(image=map_player, sigma=0.7, padding=ps, scaling=10)
+            map_sight = []
+            for item in self.G_item:
+                if item.collected:
+                    map_temp = np.zeros((ps*2+1),(ps*2+1))
+                else:
+                    pp = item.position
+                    map_temp = minimap[pp[0]:pp[0]+2*ps+1, pp[1]:pp[1]+2*ps+1]
+                map_sight.append(map_temp)
+            O = [map_sight, inv_info]
         elif (self.state_type == 'conv'):
             image = np.transpose(pg.surfarray.pixels3d(self.screen), axes=(1,0,2)) # H, W, C
             O = self.render_crop(image=image)
@@ -426,7 +419,7 @@ class GCEnv(gym.Env):
         
         # 그리드 설정
         self.grid_size = 64
-        self.grid_SP = (96,128) # 그리드가 시작되는 위치, 즉 그리드 왼쪽 상단의 위치
+        self.grid_SP = (96,80) # 그리드가 시작되는 위치, 즉 그리드 왼쪽 상단의 위치
         self.grid_EP = (self.grid_SP[0]+self.grid_num[0]*self.grid_size, 
                         self.grid_SP[1]+self.grid_num[1]*self.grid_size)
         
@@ -550,6 +543,8 @@ class GCEnv(gym.Env):
                 self.pick()
             elif (command in (1,2,3,4)): # 이동
                 self.move(command)
+                if self.env.auto_collect:
+                    self.pick()
             elif (command == -1): # Null (아무 행동하지 않음)
                 pass
             else: # 혹시나 버그로 인해 command가 이상한 값으로 설정되어 있을 때
@@ -663,64 +658,124 @@ class GCEnv(gym.Env):
                 pos = (position_list[idx]%self.grid_num[0], position_list[idx]//self.grid_num[0])
                 ItemSet.append(self.Item(self,(1,1),pos))
                 
-        elif (stage_type==3): # Subopt vs opt stage
-            # 주의 : 적어도 5x5 grid 이상만 사용할 것
-            # 주의 : 플레이어는 항상 정중앙 스폰 (subopt 배치 확률을 높이기 위함)
-            # order : opt는 언제나 B-A-C, subopt는 경우에 따라 A-B-C, A-C-B가 나온다.
-            available_A = False
-            G_W = self.grid_num[0]//2 # Grid half width
-            G_H = self.grid_num[1]//2 # Grid half height
-            
-            # (Cond 1. D_A<D_B<D_C) [subopt가 유발될 조건]
-            # (Cond 2. D_B-D_A < L_A-L_mid) [opt가 subopt보다 짧을 조건]
-            while not available_A:
-                # First, Set the position of (B,C) according to agent position.
-                D_B = random.randint(2, G_W+G_H-1) # Agent, Item B 사이 거리
-                D_C = random.randint(D_B, G_W+G_H) # D_C가 D_B보다 더 길도록 설정 (Cond 1)
-                Area_BC = random.sample(tuple(itertools.permutations([(1,1),(-1,1),(-1,-1),(1,-1)],2)), 1)[0] # B,C가 존재할 구역 선정
-                B_x = random.randint(max(D_B-G_H, 0), min(D_B, G_W))
-                B_y = D_B - B_x
-                C_x = random.randint(max(D_C-G_H, 0), min(D_C, G_W))
-                C_y = D_C - C_x
-                B_pos = (G_W+B_x*Area_BC[0][0], G_H+B_y*Area_BC[0][1])
-                C_pos = (G_W+C_x*Area_BC[1][0], G_H+C_y*Area_BC[1][1])
-                
-                # Second, Set the position of A according to Agent, B, C position.
-                for D_A in range(1, D_B): # (Cond 1)
-                    for A_x in range(0, min(D_A, G_W)+1):
-                        A_y = D_A - A_x
-                        for Area_A in [(1,1),(-1,1),(-1,-1),(1,-1)]:
-                            A_pos = (G_W+A_x*Area_A[0], G_H+A_y*Area_A[1])
-                            L_A = abs(B_pos[0]-C_pos[0]) + abs(B_pos[1]-C_pos[1]) # B, C 사이 거리 (A의 대변)
-                            L_B = abs(A_pos[0]-C_pos[0]) + abs(A_pos[1]-C_pos[1]) # A, C 사이 거리 (B의 대변)
-                            L_C = abs(A_pos[0]-B_pos[0]) + abs(A_pos[1]-B_pos[1]) # A, B 사이 거리 (C의 대변)
-                            if (D_B-D_A < L_A-L_B) and (L_C < L_B): # (Cond 2-1) subopt : A-B-C
-                                self.subopt_order.append((0,1,2))
-                                self.subopt_step.append(D_A+L_C+L_A+3)
-                                available_A = True
-                            elif (D_B-D_A < L_A-L_C) and (L_B < L_C): # (Cond 2-2) subopt : A-C-B
-                                self.subopt_order.append((0,2,1))
-                                self.subopt_step.append(D_A+L_B+L_A+3)
-                                available_A = True
-                            if (available_A):
-                                break
-                        if (available_A):
-                            break
-                    if (available_A):
-                        break
-                    
+        elif (stage_type==3): # Suboptimal Case
+            A_pos, B_pos, C_pos = self.Item_Suboptimal()
             ItemSet = [self.Item(self,(1,1),A_pos), 
                        self.Item(self,(1,1),B_pos), 
                        self.Item(self,(1,1),C_pos)]
             
-        elif (stage_type==4):
-            ItemSet = [self.Item(self,(1,1),(8,0)), 
-                       self.Item(self,(1,1),(7,0)), 
-                       self.Item(self,(1,1),(7,1)), 
-                       self.Item(self,(1,1),(6,2)), 
-                       self.Item(self,(1,1),(6,1))]
+        elif (stage_type==4): # Mixed Case
+            case_type = random.randint(0,1)
+            if (case_type == 0): # Suboptimal Case
+                A_pos, B_pos, C_pos = self.Item_Suboptimal()
+            elif (case_type == 1): # Control Case
+                A_pos, B_pos, C_pos = self.Item_Control()
+            ItemSet = [self.Item(self,(1,1),A_pos), 
+                       self.Item(self,(1,1),B_pos), 
+                       self.Item(self,(1,1),C_pos)]
         return ItemSet
     
+    # Suboptimal Case
+    # (Biased pathway > Optimal pathway)
+    def Item_Suboptimal(self):
+        """
+        opt = D_B+L_C+L_B (B-A-C)
+        biased(1) = D_A+L_C+L_A (A-B-C) [L_C<L_B]
+        biased(2) = D_A+L_B+L_A (A-C-B) [L_B<L_C]
+        """
+        # 주의 : 적어도 5x5 grid 이상만 사용할 것
+        # 주의 : 플레이어는 항상 정중앙 스폰 (subopt 배치 확률을 높이기 위함)
+        available_A = False
+        G_W = self.grid_num[0]//2 # Grid half width
+        G_H = self.grid_num[1]//2 # Grid half height
+        
+        # (Cond 1. D_A<D_B<D_C)
+        # (Cond 2. D_B-D_A < L_A-L_mid) [opt가 biased보다 짧을 조건] [L_A = L_max]
+        while not (available_A):
+            # First, Set the position of (B,C) according to agent position.
+            D_B = random.randint(2, G_W+G_H-1) # Agent, Item B 사이 거리
+            D_C = random.randint(D_B+1, G_W+G_H) # D_C가 D_B보다 더 길도록 설정 (Cond 1)
+            Area_BC = random.sample(tuple(itertools.permutations([(1,1),(-1,1),(-1,-1),(1,-1)],2)), 1)[0] # B,C가 존재할 구역 선정
+            B_x = random.randint(max(D_B-G_H, 0), min(D_B, G_W))
+            B_y = D_B - B_x
+            C_x = random.randint(max(D_C-G_H, 0), min(D_C, G_W))
+            C_y = D_C - C_x
+            B_pos = (G_W+B_x*Area_BC[0][0], G_H+B_y*Area_BC[0][1])
+            C_pos = (G_W+C_x*Area_BC[1][0], G_H+C_y*Area_BC[1][1])
+            
+            # Second, Set the position of A according to Agent, B, C position.
+            for D_A in range(1, D_B): # (Cond 1)
+                for A_x in range(0, min(D_A, G_W)+1):
+                    A_y = D_A - A_x
+                    for Area_A in [(1,1),(-1,1),(-1,-1),(1,-1)]:
+                        A_pos = (G_W+A_x*Area_A[0], G_H+A_y*Area_A[1])
+                        L_A = abs(B_pos[0]-C_pos[0]) + abs(B_pos[1]-C_pos[1]) # B, C 사이 거리 (A의 대변)
+                        L_B = abs(A_pos[0]-C_pos[0]) + abs(A_pos[1]-C_pos[1]) # A, C 사이 거리 (B의 대변)
+                        L_C = abs(A_pos[0]-B_pos[0]) + abs(A_pos[1]-B_pos[1]) # A, B 사이 거리 (C의 대변)
+                        if (D_B-D_A < L_A-L_B) and (L_C < L_B): # (Cond 2-1) subopt : A-B-C
+                            available_A = True
+                        elif (D_B-D_A < L_A-L_C) and (L_B < L_C): # (Cond 2-2) subopt : A-C-B
+                            available_A = True
+                        if (available_A):
+                            break
+                    if (available_A):
+                        break
+                if (available_A):
+                    break
+        item_pos = (A_pos, B_pos, C_pos)
+        return item_pos
+    
+    # Control Case
+    # (Biased pathway = Optimal pathway)
+    def Item_Control(self):
+        """
+        * L_A = L_max 가 아니어도 되는 경우가 있으나, 조건 동일화를 위해 Item_Suboptimal의 기본 가정인 L_A = L_max를 따르기로 함.
+        biased(1) = D_A+L_C+L_A (A-B-C) [L_C<L_B]
+        biased(2) = D_A+L_B+L_A (A-C-B) [L_B<L_C]
+        """
+        # 주의 : 적어도 5x5 grid 이상만 사용할 것
+        # 주의 : 플레이어는 항상 정중앙 스폰 (subopt 배치 확률을 높이기 위함)
+        available_A = False
+        G_W = self.grid_num[0]//2 # Grid half width
+        G_H = self.grid_num[1]//2 # Grid half height
+        
+        # (Cond 1. D_A<D_B<D_C)
+        # (Cond 2. L_A-L_mid < D_B-D_A) [opt가 biased와 같을 조건]
+        while not (available_A):
+            # First, Set the position of (B,C) according to agent position.
+            D_B = random.randint(2, G_W+G_H-1) # Agent, Item B 사이 거리
+            D_C = random.randint(D_B+1, G_W+G_H) # D_C가 D_B보다 더 길도록 설정 (Cond 1)
+            Area_BC = random.sample(tuple(itertools.permutations([(1,1),(-1,1),(-1,-1),(1,-1)],2)), 1)[0] # B,C가 존재할 구역 선정
+            B_x = random.randint(max(D_B-G_H, 0), min(D_B, G_W))
+            B_y = D_B - B_x
+            C_x = random.randint(max(D_C-G_H, 0), min(D_C, G_W))
+            C_y = D_C - C_x
+            B_pos = (G_W+B_x*Area_BC[0][0], G_H+B_y*Area_BC[0][1])
+            C_pos = (G_W+C_x*Area_BC[1][0], G_H+C_y*Area_BC[1][1])
+            
+            # Second, Set the position of A according to Agent, B, C position.
+            for D_A in range(1, D_B): # (Cond 1)
+                for A_x in range(0, min(D_A, G_W)+1):
+                    A_y = D_A - A_x
+                    for Area_A in [(1,1),(-1,1),(-1,-1),(1,-1)]:
+                        A_pos = (G_W+A_x*Area_A[0], G_H+A_y*Area_A[1])
+                        L_A = abs(B_pos[0]-C_pos[0]) + abs(B_pos[1]-C_pos[1]) # B, C 사이 거리 (A의 대변)
+                        L_B = abs(A_pos[0]-C_pos[0]) + abs(A_pos[1]-C_pos[1]) # A, C 사이 거리 (B의 대변)
+                        L_C = abs(A_pos[0]-B_pos[0]) + abs(A_pos[1]-B_pos[1]) # A, B 사이 거리 (C의 대변)
+                        if (L_A > L_B) and (L_A > L_C): # L_A = L_max
+                            if (D_B-D_A > L_A-L_B) and (L_C < L_B): # (Cond 2-1) A-B-C
+                                available_A = True
+                            elif (D_B-D_A > L_A-L_C) and (L_B < L_C): # (Cond 2-2) A-C-B
+                                available_A = True
+                        if (available_A):
+                            break
+                    if (available_A):
+                        break
+                if (available_A):
+                    break
+        item_pos = (A_pos, B_pos, C_pos)
+        return item_pos
+        
     
 #%% Game System
 
@@ -768,34 +823,6 @@ def check_dir(path):
             os.makedirs(path)
     except OSError:
         print('Error: Failed to create the directory.')
-
-
-# 가우시안 필터 (블러)
-# 주의 : transposed array output이 나온다.
-def filter_gauss2d(size=(5,5), sigma=1):
-    size = np.array(size)
-    kernel = np.zeros(size)
-    center = np.floor(size/2).astype(int)
-    for x in range(size[0]):
-        for y in range(size[1]):
-            target = np.array([x,y])
-            kernel[x,y] = np.exp(-np.sum((center-target)**2)/(2*(sigma**2)))/(2*np.pi*(sigma**2))
-    return kernel
-
-
-# 컨볼루션
-# 주의 1 : transposed input을 입력해야 한다.
-# 주의 2 : transposed array output이 나온다.
-def conv2d(image, kernel, padding=2, scaling=1):
-    K_wh = np.array(kernel.shape) # kernel width, height
-    image = np.pad(image, ((padding,)*2,)*2, 'constant', constant_values=0)
-    I_wh = np.array(image.shape) # padded image width, height
-    feature = np.zeros((I_wh-K_wh+1))
-    for x in range(I_wh[0]-K_wh[0]+1):
-        for y in range(I_wh[1]-K_wh[1]+1):
-            feature[x,y] = scaling * np.sum(image[x:x+K_wh[0],y:y+K_wh[1]]*kernel)
-    return feature
-
 
 # 개선된 가우시안 컨볼루션
 def pseudo_conv2d(image, sigma=1, padding=2, scaling=1):
@@ -1892,8 +1919,6 @@ def result_show(agent):
     ax.set_ylabel('Steps')
     
     ax.plot(agent.env.optimal_step, color='blue', linewidth=0.8, linestyle='--', label='Step Optimal')
-    if (agent.env.stage_type==3):
-        ax.plot(agent.env.subopt_step, color='skyblue', linewidth=0.8, linestyle='-.', label='Step Suboptimal')
     ax.plot(agent.step_list, color='green', linewidth=0.8)
     ax.axhline(agent.step_truncate, color='red', linewidth=1.5, linestyle='--', label='Step Limit')
     ax.legend(loc='upper right')
@@ -1971,15 +1996,11 @@ def result_record(agent):
     # 4. optimal step
     with open(f'{path}/[S{N_stage}]list_optimal.pkl', 'wb') as f:
         pickle.dump(env.optimal_step, f)
-    # 4-2. subopt step
-    if (env.stage_type==3):
-        with open(f'{path}/[S{N_stage}]list_subopt.pkl', 'wb') as f:
-            pickle.dump(env.subopt_step, f)
 
 
 #%% Play 함수
 ## Human
-def play_human(env_render='human', env_stage=0, env_grid=(9,7)):
+def play_human(env_stage=0, env_grid=(9,7), env_collect=False):
     global env
     global act
     
@@ -1989,7 +2010,7 @@ def play_human(env_render='human', env_stage=0, env_grid=(9,7)):
     episode_limit = int(input('플레이 할 에피소드 수를 입력: '))
 
     # 환경 구성
-    env = GCEnv(render_mode=env_render, stage_type=env_stage, grid_num=env_grid)
+    env = GCEnv(render_mode='human', stage_type=env_stage, grid_num=env_grid, auto_collect=env_collect)
 
     # 게임 플레이
     step = 0
@@ -2030,7 +2051,7 @@ def play_human(env_render='human', env_stage=0, env_grid=(9,7)):
 
 
 ## Agent
-def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='onehot',
+def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_collect=False, env_state='onehot',
                model_name='DQN', model_ST=500, model_EL=1000, model_ED=0.999,
                play_type='save'):
     """
@@ -2047,7 +2068,8 @@ def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='oneho
     DV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # 환경 구성
-    env = GCEnv(render_mode=env_render, stage_type=env_stage, grid_num=env_grid, state_type=env_state)
+    env = GCEnv(render_mode=env_render, stage_type=env_stage, grid_num=env_grid, 
+                auto_collect=env_collect, state_type=env_state)
     model_type = f'[S{env_stage}][{env_state}]'
     model_path = f'{dir_main}/Model/{model_name}'
 
@@ -2093,8 +2115,8 @@ def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_state='oneho
 
 #%% 플레이
 
-play_human(env_render='human', env_stage=1, env_grid=(9,7))
+# play_human(env_stage=4, env_grid=(9,9), env_collect=True)
 
-# play_agent(env_render='human', env_stage=1, env_grid=(9,7), env_state='ego',
-#           model_name='DDQN', model_ST=500, model_EL=2000, model_ED=0.999,
-#           play_type='load')
+play_agent(env_render='agent', env_stage=4, env_grid=(9,9), env_collect=True, env_state='ego',
+          model_name='DDQN', model_ST=500, model_EL=10000, model_ED=0.9995,
+          play_type='save')
