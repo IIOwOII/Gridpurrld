@@ -27,7 +27,7 @@ import torch.distributions as dist
 dir_main = os.path.split(os.path.abspath(__file__))[0]
 
 # 게임 상수 설정
-G_FPS = 100
+G_FPS = 30
 C_white = (255,255,255)
 C_black = (0,0,0)
 C_border = (96,96,96)
@@ -72,13 +72,28 @@ class GCEnv(gym.Env):
         self.grid_num = grid_num # 맵의 크기 (나중에 고칠 것)
         self.stage_type = stage_type # 스테이지 타입
         
-        # 스테이지 정보
-        self.optimal_step = [] # Reset마다 해당 스테이지에서 가능한 가장 짧은 step을 기록
-        self.optimal_order = [] # Reset마다 해당 스테이지에서 가능한 가장 짧은 path를 기록
+        ## 스테이지 정보
+        # Optimal
+        self.optimal_order = [] # Episode마다 가장 짧은 pathway를 기록
+        self.optimal_step = [] # Episode마다 이론상 가능한 가장 짧은 step을 기록
+        # Biased
+        self.biased_order = [] # Episode마다 human이 택할 것 같은 pathway를 기록
+        self.biased_step = [] # Episode마다 human이 택할 것 같은 경로의 총 step 예상치를 기록
+        self.bias_amount = []
+        # Actual
+        self.actual_order = [] # Episode 끝날때마다 실제 pathway를 기록
+        self.actual_step = [] # Episode 끝날때마다 실제 총 step을 기록
+        self.trial_type = []
+        # Temp
+        self.current_step = 0 # 해당 Episode에서 행한 step 수 실시간 기록
+        self.current_order = [-1,-1,-1] # 해당 Episode에서 pathway 실시간 기록
+        self.current_episode = 0 # 진행중인 Episode number (주의: 1부터 시작)
         
-        # 내부 클래스 선언
+        # 주요 요소 선언
         self.G_player = self.Player(self, (self.grid_num[0]//2,self.grid_num[1]//2)) # Player
         self.G_item = self.ItemCreator() # Item
+        if (stage_type == 4):
+            self.G_case = np.array([0,0,0,0,0,1,1,1,1,1]) # 10 episode 마다 sub,con case 샘플링
         
         # 렌더 활성화
         self.render_initialize()
@@ -96,10 +111,10 @@ class GCEnv(gym.Env):
         if (state_type == 'onehot'):
             self.state_space = (2*grid_num[0]*grid_num[1]+6)*2
         elif (state_type == 'ego'):
-            self.player_sight = 5
+            self.player_sight = 7
             self.state_space = 6+(2*self.player_sight+1)**2
         elif (state_type == 'allo'): # item이 3개인 경우만 가능
-            self.item_sight = 5
+            self.item_sight = 7
             self.state_space = 6+((2*self.item_sight+1)**2)*3
         elif (state_type == 'conv'):
             self.state_space = 40
@@ -124,6 +139,10 @@ class GCEnv(gym.Env):
     
     ## step
     def step(self, action):
+        # Update step info
+        self.current_step += 1
+        self.info = {'Eval': 'None'}
+        
         # 액션 이전, 플레이어 정보
         inv_before = self.G_player.inventory_num
         
@@ -139,9 +158,6 @@ class GCEnv(gym.Env):
         
         # State 구성
         self.observation = self.FS_observe(output_type='flatten')
-        
-        # Step Info
-        self.info = {'Eval': 'None'}
         
         # reward and done
         if (inv_after == inv_before): # 아이템 미수집 시
@@ -177,6 +193,18 @@ class GCEnv(gym.Env):
     
     ## 한 에피소드가 끝났을 때
     def reset(self):
+        # Reset Step info
+        if (self.current_step != 0): # 첫 리셋은 기록 생략
+            self.actual_step.append(self.current_step)
+            self.actual_order.append(self.current_order)
+        self.current_step = 0
+        self.current_order = [-1,-1,-1]
+        
+        # Update Episode info
+        self.current_episode += 1
+        if (self.stage_type == 4) and (self.current_episode%10 == 1):
+            np.random.shuffle(self.G_case)
+        
         # Reset
         self.G_item = self.ItemCreator(self.stage_type) # 아이템 생성 (나중에 고칠 것)
         if (self.stage_type == 3) or (self.stage_type == 4):
@@ -189,10 +217,10 @@ class GCEnv(gym.Env):
         # State
         self.observation = self.FS_observe(output_type='flatten')
         
-        # 스테이지 정보 기록
-        opt_step, opt_order = self.FI_optimal()
-        self.optimal_step.append(opt_step)
-        self.optimal_order.append(opt_order)
+        # # 스테이지 정보 기록
+        # opt_step, opt_order = self.FI_optimal()
+        # self.optimal_step.append(opt_step)
+        # self.optimal_order.append(opt_order)
         
         return self.observation
     
@@ -221,7 +249,7 @@ class GCEnv(gym.Env):
             map_sight = []
             for item in self.G_item:
                 if item.collected:
-                    map_temp = np.zeros((ps*2+1),(ps*2+1))
+                    map_temp = np.zeros(((ps*2+1),(ps*2+1)))
                 else:
                     pp = item.position
                     map_temp = minimap[pp[0]:pp[0]+2*ps+1, pp[1]:pp[1]+2*ps+1]
@@ -522,6 +550,11 @@ class GCEnv(gym.Env):
     
     ## 게임 종료
     def close(self):
+        # Last Recording
+        self.actual_step.append(self.current_step)
+        self.actual_order.append(self.current_order)
+        
+        # Exit
         pg.quit()
     
     
@@ -553,13 +586,14 @@ class GCEnv(gym.Env):
         
         # 아이템 수집
         def pick(self):
-            for item in self.env.G_item:
+            for item_idx, item in enumerate(self.env.G_item):
                 # 플레이어와 위치도 겹치고, 아직 수집 되지 않은 아이템인 경우
                 if (item.position == self.position) and not item.collected:
                     if self.env.render_once:
                         item.rect.topleft = (self.env.Inv_SP[0]+self.inventory_num*self.env.grid_size, 
                                              self.env.Inv_SP[1]+self.env.Inv_height)
                     item.collected = True
+                    self.env.current_order[self.inventory_num] = item_idx # 수집한 아이템 인덱스 저장
                     self.inventory[self.inventory_num] = item
                     self.inventory_num += 1
         
@@ -659,20 +693,35 @@ class GCEnv(gym.Env):
                 ItemSet.append(self.Item(self,(1,1),pos))
                 
         elif (stage_type==3): # Suboptimal Case
-            A_pos, B_pos, C_pos = self.Item_Suboptimal()
-            ItemSet = [self.Item(self,(1,1),A_pos), 
-                       self.Item(self,(1,1),B_pos), 
-                       self.Item(self,(1,1),C_pos)]
+            item_pos, opt_info, bias_info, bias_amount = self.Item_Suboptimal()
+            ItemSet = [self.Item(self,(1,1),item_pos[0]), 
+                       self.Item(self,(1,1),item_pos[1]), 
+                       self.Item(self,(1,1),item_pos[2])]
+            self.optimal_order.append(opt_info[0])
+            self.optimal_step.append(opt_info[1])
+            self.biased_order.append(bias_info[0])
+            self.biased_step.append(bias_info[1])
+            self.bias_amount.append(bias_amount)
             
         elif (stage_type==4): # Mixed Case
-            case_type = random.randint(0,1)
+            case_type = self.G_case[self.current_episode%10-1]
+            print(' ')
             if (case_type == 0): # Suboptimal Case
-                A_pos, B_pos, C_pos = self.Item_Suboptimal()
+                item_pos, opt_info, bias_info, bias_amount = self.Item_Suboptimal()
+                print('sub',opt_info[1],bias_info[1])
             elif (case_type == 1): # Control Case
-                A_pos, B_pos, C_pos = self.Item_Control()
-            ItemSet = [self.Item(self,(1,1),A_pos), 
-                       self.Item(self,(1,1),B_pos), 
-                       self.Item(self,(1,1),C_pos)]
+                item_pos, opt_info, bias_info, bias_amount = self.Item_Control()
+                print('con',opt_info[1],bias_info[1])
+            ItemSet = [self.Item(self,(1,1),item_pos[0]), 
+                       self.Item(self,(1,1),item_pos[1]), 
+                       self.Item(self,(1,1),item_pos[2])]
+            self.optimal_order.append(opt_info[0])
+            self.optimal_step.append(opt_info[1])
+            self.biased_order.append(bias_info[0])
+            self.biased_step.append(bias_info[1])
+            self.bias_amount.append(bias_amount)
+            self.trial_type.append(case_type)
+            
         return ItemSet
     
     # Suboptimal Case
@@ -713,8 +762,12 @@ class GCEnv(gym.Env):
                         L_B = abs(A_pos[0]-C_pos[0]) + abs(A_pos[1]-C_pos[1]) # A, C 사이 거리 (B의 대변)
                         L_C = abs(A_pos[0]-B_pos[0]) + abs(A_pos[1]-B_pos[1]) # A, B 사이 거리 (C의 대변)
                         if (D_B-D_A < L_A-L_B) and (L_C < L_B): # (Cond 2-1) subopt : A-B-C
+                            bias_order = (0,1,2)
+                            bias_step = D_A+L_C+L_A
                             available_A = True
                         elif (D_B-D_A < L_A-L_C) and (L_B < L_C): # (Cond 2-2) subopt : A-C-B
+                            bias_order = (0,2,1)
+                            bias_step = D_A+L_B+L_A
                             available_A = True
                         if (available_A):
                             break
@@ -722,8 +775,13 @@ class GCEnv(gym.Env):
                         break
                 if (available_A):
                     break
+        bias_amount = D_B-D_A
         item_pos = (A_pos, B_pos, C_pos)
-        return item_pos
+        bias_info = (bias_order, bias_step)
+        opt_order = (1,0,2)
+        opt_step = D_B+L_C+L_B
+        opt_info = (opt_order, opt_step)
+        return item_pos, opt_info, bias_info, bias_amount
     
     # Control Case
     # (Biased pathway = Optimal pathway)
@@ -764,8 +822,12 @@ class GCEnv(gym.Env):
                         L_C = abs(A_pos[0]-B_pos[0]) + abs(A_pos[1]-B_pos[1]) # A, B 사이 거리 (C의 대변)
                         if (L_A > L_B) and (L_A > L_C): # L_A = L_max
                             if (D_B-D_A > L_A-L_B) and (L_C < L_B): # (Cond 2-1) A-B-C
+                                bias_order = (0,1,2)
+                                bias_step = D_A+L_C+L_A
                                 available_A = True
                             elif (D_B-D_A > L_A-L_C) and (L_B < L_C): # (Cond 2-2) A-C-B
+                                bias_order = (0,2,1)
+                                bias_step = D_A+L_B+L_A
                                 available_A = True
                         if (available_A):
                             break
@@ -773,8 +835,11 @@ class GCEnv(gym.Env):
                         break
                 if (available_A):
                     break
+        bias_amount = D_B-D_A
         item_pos = (A_pos, B_pos, C_pos)
-        return item_pos
+        bias_info = (bias_order, bias_step)
+        opt_info = bias_info
+        return item_pos, opt_info, bias_info, bias_amount
         
     
 #%% Game System
@@ -1094,7 +1159,7 @@ class Agent_DDQ:
     def model_save(self):
         path = f'./Model/{self.name}'
         check_dir(path)
-        model_type = f'[S{self.env.stage_type}][{self.env.state_type}]'
+        model_type = f'[S{self.env.stage_type}][{self.env.state_type}][]'
         torch.save(self.net_Q.state_dict(), f'{path}/{model_type}net_Q(param).pt')
         torch.save(self.net_Q, f'{path}/{model_type}net_Q(all).pt')
         torch.save(self.net_M.state_dict(), f'{path}/{model_type}net_M(param).pt')
@@ -2000,7 +2065,7 @@ def result_record(agent):
 
 #%% Play 함수
 ## Human
-def play_human(env_stage=0, env_grid=(9,7), env_collect=False):
+def play_human(env_stage=0, env_grid=(9,7), env_collect=False, beh_save=False):
     global env
     global act
     
@@ -2035,6 +2100,8 @@ def play_human(env_stage=0, env_grid=(9,7), env_collect=False):
                         act = 3
                     elif event.key == pg.K_DOWN:
                         act = 4
+                    if env.auto_collect:
+                        act -= 1
             if act != -1:
                 S, R, D, I = env.step(act)
                 env.render()
@@ -2048,12 +2115,39 @@ def play_human(env_stage=0, env_grid=(9,7), env_collect=False):
         step = 0
     
     env.close()
-
+    
+    # Behavior data save
+    if beh_save:
+        # Main Path
+        path = './Behavior/Human'
+        check_dir(path)
+        
+        # Increment Path
+        exp_idx = 0
+        while os.path.exists(f'{path}/exp{exp_idx}'):
+            exp_idx += 1
+        os.mkdir(f'{path}/exp{exp_idx}')
+        
+        # Save
+        with open(f'{path}/exp{exp_idx}/[S{env_stage}]actual_order.pkl', 'wb') as f:
+            pickle.dump(env.actual_order, f, protocol=pickle.HIGHEST_PROTOCOL)
+        with open(f'{path}/exp{exp_idx}/[S{env_stage}]actual_step.pkl', 'wb') as f:
+            pickle.dump(env.actual_step, f, protocol=pickle.HIGHEST_PROTOCOL)
+        with open(f'{path}/exp{exp_idx}/[S{env_stage}]optimal_order.pkl', 'wb') as f:
+            pickle.dump(env.optimal_order, f, protocol=pickle.HIGHEST_PROTOCOL)
+        with open(f'{path}/exp{exp_idx}/[S{env_stage}]optimal_step.pkl', 'wb') as f:
+            pickle.dump(env.optimal_step, f, protocol=pickle.HIGHEST_PROTOCOL)
+        if (env.stage_type==3 or env.stage_type==4):
+            with open(f'{path}/exp{exp_idx}/[S{env_stage}]biased_order.pkl', 'wb') as f:
+                pickle.dump(env.biased_order, f, protocol=pickle.HIGHEST_PROTOCOL)
+            with open(f'{path}/exp{exp_idx}/[S{env_stage}]biased_step.pkl', 'wb') as f:
+                pickle.dump(env.biased_step, f, protocol=pickle.HIGHEST_PROTOCOL)
+        
 
 ## Agent
 def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_collect=False, env_state='onehot',
                model_name='DQN', model_ST=500, model_EL=1000, model_ED=0.999,
-               play_type='save'):
+               play_type='save', beh_save=False):
     """
     play_type
     - save
@@ -2112,11 +2206,38 @@ def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_collect=Fals
         # 모델 저장
         agent.model_save()
     
+    # Behavior data save
+    if beh_save:
+        # Main Path
+        path = './Behavior/Agent'
+        check_dir(path)
+        
+        # Increment Path
+        exp_idx = 0
+        while os.path.exists(f'{path}/exp{exp_idx}'):
+            exp_idx += 1
+        os.mkdir(f'{path}/exp{exp_idx}')
+        
+        # Save
+        with open(f'{path}/exp{exp_idx}/[{model_name}]{model_type}actual_order.pkl', 'wb') as f:
+            pickle.dump(env.actual_order, f, protocol=pickle.HIGHEST_PROTOCOL)
+        with open(f'{path}/exp{exp_idx}/[{model_name}]{model_type}actual_step.pkl', 'wb') as f:
+            pickle.dump(env.actual_step, f, protocol=pickle.HIGHEST_PROTOCOL)
+        with open(f'{path}/exp{exp_idx}/[{model_name}]{model_type}optimal_order.pkl', 'wb') as f:
+            pickle.dump(env.optimal_order, f, protocol=pickle.HIGHEST_PROTOCOL)
+        with open(f'{path}/exp{exp_idx}/[{model_name}]{model_type}optimal_step.pkl', 'wb') as f:
+            pickle.dump(env.optimal_step, f, protocol=pickle.HIGHEST_PROTOCOL)
+        if (env.stage_type==3 or env.stage_type==4):
+            with open(f'{path}/exp{exp_idx}/[{model_name}]{model_type}biased_order.pkl', 'wb') as f:
+                pickle.dump(env.biased_order, f, protocol=pickle.HIGHEST_PROTOCOL)
+            with open(f'{path}/exp{exp_idx}/[{model_name}]{model_type}biased_step.pkl', 'wb') as f:
+                pickle.dump(env.biased_step, f, protocol=pickle.HIGHEST_PROTOCOL)
+    
 
 #%% 플레이
 
-# play_human(env_stage=4, env_grid=(9,9), env_collect=True)
+play_human(env_stage=4, env_grid=(9,9), env_collect=True, beh_save=True)
 
-play_agent(env_render='agent', env_stage=4, env_grid=(9,9), env_collect=True, env_state='ego',
-          model_name='DDQN', model_ST=500, model_EL=10000, model_ED=0.9995,
-          play_type='save')
+# play_agent(env_render='human', env_stage=4, env_grid=(9,9), env_collect=True, env_state='allo',
+#           model_name='DDQN', model_ST=50, model_EL=100, model_ED=0.9999,
+#           play_type='load', beh_save=True)
