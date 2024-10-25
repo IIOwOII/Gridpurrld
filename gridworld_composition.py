@@ -2062,6 +2062,39 @@ def result_record(agent):
     with open(f'{path}/[S{N_stage}]list_optimal.pkl', 'wb') as f:
         pickle.dump(env.optimal_step, f)
 
+# 행동 데이터 저장
+def behavior_save(env, player_type='human', prefix=''):
+    # Main Path
+    path = f'./Behavior/{player_type}'
+    check_dir(path)
+    
+    # Increment Path
+    exp_idx = 0
+    while os.path.exists(f'{path}/exp{exp_idx}'):
+        exp_idx += 1
+    os.mkdir(f'{path}/exp{exp_idx}')
+    
+    # Save
+    with open(f'{path}/exp{exp_idx}/{prefix}actual_order.pkl', 'wb') as f:
+        pickle.dump(env.actual_order, f, protocol=pickle.HIGHEST_PROTOCOL)
+    with open(f'{path}/exp{exp_idx}/{prefix}actual_step.pkl', 'wb') as f:
+        pickle.dump(env.actual_step, f, protocol=pickle.HIGHEST_PROTOCOL)
+    with open(f'{path}/exp{exp_idx}/{prefix}optimal_order.pkl', 'wb') as f:
+        pickle.dump(env.optimal_order, f, protocol=pickle.HIGHEST_PROTOCOL)
+    with open(f'{path}/exp{exp_idx}/{prefix}optimal_step.pkl', 'wb') as f:
+        pickle.dump(env.optimal_step, f, protocol=pickle.HIGHEST_PROTOCOL)
+    if (env.stage_type==3 or env.stage_type==4):
+        with open(f'{path}/exp{exp_idx}/{prefix}biased_order.pkl', 'wb') as f:
+            pickle.dump(env.biased_order, f, protocol=pickle.HIGHEST_PROTOCOL)
+        with open(f'{path}/exp{exp_idx}/{prefix}biased_step.pkl', 'wb') as f:
+            pickle.dump(env.biased_step, f, protocol=pickle.HIGHEST_PROTOCOL)
+        with open(f'{path}/exp{exp_idx}/{prefix}bias_amount.pkl', 'wb') as f:
+            pickle.dump(env.bias_amount, f, protocol=pickle.HIGHEST_PROTOCOL)
+        if (env.stage_type==4):
+            with open(f'{path}/exp{exp_idx}/{prefix}trial_type.pkl', 'wb') as f:
+                pickle.dump(env.trial_type, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
 
 #%% Play 함수
 ## Human
@@ -2118,30 +2151,7 @@ def play_human(env_stage=0, env_grid=(9,7), env_collect=False, beh_save=False):
     
     # Behavior data save
     if beh_save:
-        # Main Path
-        path = './Behavior/Human'
-        check_dir(path)
-        
-        # Increment Path
-        exp_idx = 0
-        while os.path.exists(f'{path}/exp{exp_idx}'):
-            exp_idx += 1
-        os.mkdir(f'{path}/exp{exp_idx}')
-        
-        # Save
-        with open(f'{path}/exp{exp_idx}/[S{env_stage}]actual_order.pkl', 'wb') as f:
-            pickle.dump(env.actual_order, f, protocol=pickle.HIGHEST_PROTOCOL)
-        with open(f'{path}/exp{exp_idx}/[S{env_stage}]actual_step.pkl', 'wb') as f:
-            pickle.dump(env.actual_step, f, protocol=pickle.HIGHEST_PROTOCOL)
-        with open(f'{path}/exp{exp_idx}/[S{env_stage}]optimal_order.pkl', 'wb') as f:
-            pickle.dump(env.optimal_order, f, protocol=pickle.HIGHEST_PROTOCOL)
-        with open(f'{path}/exp{exp_idx}/[S{env_stage}]optimal_step.pkl', 'wb') as f:
-            pickle.dump(env.optimal_step, f, protocol=pickle.HIGHEST_PROTOCOL)
-        if (env.stage_type==3 or env.stage_type==4):
-            with open(f'{path}/exp{exp_idx}/[S{env_stage}]biased_order.pkl', 'wb') as f:
-                pickle.dump(env.biased_order, f, protocol=pickle.HIGHEST_PROTOCOL)
-            with open(f'{path}/exp{exp_idx}/[S{env_stage}]biased_step.pkl', 'wb') as f:
-                pickle.dump(env.biased_step, f, protocol=pickle.HIGHEST_PROTOCOL)
+        behavior_save(env=env, player_type='human', prefix=f'[S{env.stage_type}]')
         
 
 ## Agent
@@ -2208,36 +2218,13 @@ def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_collect=Fals
     
     # Behavior data save
     if beh_save:
-        # Main Path
-        path = './Behavior/Agent'
-        check_dir(path)
-        
-        # Increment Path
-        exp_idx = 0
-        while os.path.exists(f'{path}/exp{exp_idx}'):
-            exp_idx += 1
-        os.mkdir(f'{path}/exp{exp_idx}')
-        
-        # Save
-        with open(f'{path}/exp{exp_idx}/[{model_name}]{model_type}actual_order.pkl', 'wb') as f:
-            pickle.dump(env.actual_order, f, protocol=pickle.HIGHEST_PROTOCOL)
-        with open(f'{path}/exp{exp_idx}/[{model_name}]{model_type}actual_step.pkl', 'wb') as f:
-            pickle.dump(env.actual_step, f, protocol=pickle.HIGHEST_PROTOCOL)
-        with open(f'{path}/exp{exp_idx}/[{model_name}]{model_type}optimal_order.pkl', 'wb') as f:
-            pickle.dump(env.optimal_order, f, protocol=pickle.HIGHEST_PROTOCOL)
-        with open(f'{path}/exp{exp_idx}/[{model_name}]{model_type}optimal_step.pkl', 'wb') as f:
-            pickle.dump(env.optimal_step, f, protocol=pickle.HIGHEST_PROTOCOL)
-        if (env.stage_type==3 or env.stage_type==4):
-            with open(f'{path}/exp{exp_idx}/[{model_name}]{model_type}biased_order.pkl', 'wb') as f:
-                pickle.dump(env.biased_order, f, protocol=pickle.HIGHEST_PROTOCOL)
-            with open(f'{path}/exp{exp_idx}/[{model_name}]{model_type}biased_step.pkl', 'wb') as f:
-                pickle.dump(env.biased_step, f, protocol=pickle.HIGHEST_PROTOCOL)
+        behavior_save(env=env, player_type='agent', prefix=f'[S{env.stage_type}][{model_name},{env_state}]')
     
 
 #%% 플레이
 
-play_human(env_stage=4, env_grid=(9,9), env_collect=True, beh_save=True)
+# play_human(env_stage=4, env_grid=(9,9), env_collect=True, beh_save=True)
 
-# play_agent(env_render='human', env_stage=4, env_grid=(9,9), env_collect=True, env_state='allo',
-#           model_name='DDQN', model_ST=50, model_EL=100, model_ED=0.9999,
-#           play_type='load', beh_save=True)
+play_agent(env_render='agent', env_stage=4, env_grid=(9,9), env_collect=True, env_state='ego',
+          model_name='DDQN', model_ST=50, model_EL=1000, model_ED=0.9999,
+          play_type='load', beh_save=True)
