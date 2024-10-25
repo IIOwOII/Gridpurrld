@@ -36,7 +36,7 @@ C_lightgreen = (170,240,180)
 
 
 #%%
-class GCEnv(gym.Env):
+class Env_Gridpurrld(gym.Env):
     def __init__(self, render_mode=None, stage_type=0, grid_num=(9,9), auto_collect=False,
                  reward_set=(3.,1.,1.,-0.01,-0.02), state_type='onehot'):
         """
@@ -2108,7 +2108,7 @@ def play_human(env_stage=0, env_grid=(9,7), env_collect=False, beh_save=False):
     episode_limit = int(input('플레이 할 에피소드 수를 입력: '))
 
     # 환경 구성
-    env = GCEnv(render_mode='human', stage_type=env_stage, grid_num=env_grid, auto_collect=env_collect)
+    env = Env_Gridpurrld(render_mode='human', stage_type=env_stage, grid_num=env_grid, auto_collect=env_collect)
 
     # 게임 플레이
     step = 0
@@ -2172,7 +2172,7 @@ def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_collect=Fals
     DV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # 환경 구성
-    env = GCEnv(render_mode=env_render, stage_type=env_stage, grid_num=env_grid, 
+    env = Env_Gridpurrld(render_mode=env_render, stage_type=env_stage, grid_num=env_grid, 
                 auto_collect=env_collect, state_type=env_state)
     model_type = f'[S{env_stage}][{env_state}]'
     model_path = f'{dir_main}/Model/{model_name}'
