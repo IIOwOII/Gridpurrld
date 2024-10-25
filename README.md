@@ -1,5 +1,5 @@
-# composition-gridworld
-*Gridworld environment for performing composition tasks with Reinforcement Learning!*
+# Gridpurrld
+*Gridworld environment for performing item collecting tasks with Reinforcement Learning!*
 <br/>
 
 ---
@@ -8,11 +8,11 @@
 py파일이 존재하는 경로에 같이 존재해야합니다.<br/>
 
 ---
-## GridWorld_Composition(Old).py
+## Gridpurrld_Legacy.py
 사람용으로 짜여진 레거시 코드입니다. <br/>
 
 ---
-## gridworld_composition.py
+## Gridpurrld.py
 렌더링될 환경, 강화학습 모델 등 다양한 코드들이 짜여져 있습니다.
 
 ### Env
