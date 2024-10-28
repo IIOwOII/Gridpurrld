@@ -37,7 +37,7 @@ C_lightgreen = (170,240,180)
 
 #%%
 class Env_Gridpurrld(gym.Env):
-    def __init__(self, render_mode=None, stage_type=0, grid_num=(9,9), auto_collect=False,
+    def __init__(self, render_mode=None, stage_type=0, grid_num=(9,9), auto_collect=False, time_limit=False, 
                  reward_set=(3.,1.,1.,-0.01,-0.02), state_type='onehot'):
         """
         render_mode
@@ -71,6 +71,7 @@ class Env_Gridpurrld(gym.Env):
         self.G_clock = None # Time
         self.grid_num = grid_num # 맵의 크기 (나중에 고칠 것)
         self.stage_type = stage_type # 스테이지 타입
+        self.time_limit = time_limit # 시간 제한 유무
         
         ## 스테이지 정보
         # Optimal
@@ -84,7 +85,7 @@ class Env_Gridpurrld(gym.Env):
         self.actual_order = [] # Episode 끝날때마다 실제 pathway를 기록
         self.actual_step = [] # Episode 끝날때마다 실제 총 step을 기록
         self.trial_type = []
-        # Temp
+        # Current
         self.current_step = 0 # 해당 Episode에서 행한 step 수 실시간 기록
         self.current_order = [-1,-1,-1] # 해당 Episode에서 pathway 실시간 기록
         self.current_episode = 0 # 진행중인 Episode number (주의: 1부터 시작)
@@ -116,10 +117,11 @@ class Env_Gridpurrld(gym.Env):
         elif (state_type == 'allo'): # item이 3개인 경우만 가능
             self.item_sight = 7
             self.state_space = 6+((2*self.item_sight+1)**2)*3
-        elif (state_type == 'conv'):
+        elif (state_type == 'image'):
             self.state_space = 40
-            self.resizer = T.Compose(
-                [T.Resize((self.state_space,self.state_space)), T.Normalize(0,255)])
+            self.image_converter = T.Compose(
+                [T.Resize((self.state_space,self.state_space), antialias=True), 
+                 T.Normalize(0,255)])
         else:
             raise SystemExit('Please check the state_type')
         
@@ -157,7 +159,7 @@ class Env_Gridpurrld(gym.Env):
         inv_after = self.G_player.inventory_num
         
         # State 구성
-        self.observation = self.FS_observe(output_type='flatten')
+        self.observation = self.FS_observe()
         
         # reward and done
         if (inv_after == inv_before): # 아이템 미수집 시
@@ -215,7 +217,12 @@ class Env_Gridpurrld(gym.Env):
         self.done = False
         
         # State
-        self.observation = self.FS_observe(output_type='flatten')
+        self.observation = self.FS_observe()
+        
+        # 타이머 리셋
+        if self.time_limit and (self.G_clock is not None):
+            self.time_start = pg.time.get_ticks()
+            self.time_total = self.FG_time_total()
         
         # # 스테이지 정보 기록
         # opt_step, opt_order = self.FI_optimal()
@@ -225,9 +232,17 @@ class Env_Gridpurrld(gym.Env):
         return self.observation
     
     
+    ## (Function of Game Component) Game Component와 관련된 함수
+    # 스테이지 총 제한 시간
+    def FG_time_total(self):
+        if (self.stage_type == 4):
+            time_total = 10
+        return time_total
+    
+    
     ## (Function of State) State와 관련된 함수
     # Observation 구성
-    def FS_observe(self, output_type='flatten'):
+    def FS_observe(self):
         # Current State
         map_player = self.FS_map_player()
         map_item = self.FS_map_item()
@@ -255,10 +270,9 @@ class Env_Gridpurrld(gym.Env):
                     map_temp = minimap[pp[0]:pp[0]+2*ps+1, pp[1]:pp[1]+2*ps+1]
                 map_sight.append(map_temp)
             O = [map_sight, inv_info]
-        elif (self.state_type == 'conv'):
-            image = np.transpose(pg.surfarray.pixels3d(self.screen), axes=(1,0,2)) # H, W, C
-            O = self.render_crop(image=image)
-            return O
+        elif (self.state_type == 'image'):
+            O = self.FS_crop() # C,H,W
+            O = self.image_converter(torch.from_numpy(np.array([O])).float()) # 미리 텐서화
         else: # 버그 예외 처리
             raise SystemExit('Please check the state_type. It seems None')
         
@@ -269,10 +283,8 @@ class Env_Gridpurrld(gym.Env):
         self.M_pos_player = self.G_player.position # tuple이기 때문에 copy를 쓰지 않아도 무방.
         
         # Output Type
-        if (output_type == 'flatten'):
+        if (self.state_type != 'image'):
             O = all_flatten(O)
-        else: # 버그 방지
-            raise SystemExit('Please check the output_type.')
         
         return O
     
@@ -334,6 +346,14 @@ class Env_Gridpurrld(gym.Env):
                 if C_idx != 0:
                     inv_info[d, C_idx-1] += 1
         return inv_info
+    
+    # Grid image Crop
+    def FS_crop(self):
+        img = pg.surfarray.pixels3d(self.screen) # W,H,C
+        img = img[self.grid_SP[1]:self.grid_EP[1],self.grid_SP[0]:self.grid_EP[0],:] # W,H,C
+        img = np.transpose(img, axes=(2,1,0)) # C,H,W
+        img = np.ascontiguousarray(img)
+        return img
     
     
     ## (Function of Reward) Reward와 관련된 함수
@@ -425,7 +445,7 @@ class Env_Gridpurrld(gym.Env):
         # 렌더 모드 체크
         if (self.render_mode == 'agent'): # Agent 모드
             return
-        elif (self.render_mode == 'human'): # human 모드
+        elif (self.render_mode == 'human') or (self.render_mode == 'hidden'): # human, hidden 모드
             pass
         else: # 렌더 모드가 부적절한 경우
             raise SystemExit('You have to specify the render_mode. etc: human')
@@ -440,7 +460,10 @@ class Env_Gridpurrld(gym.Env):
         
         # 해상도 설정
         self.G_resolution = (1280,720)
-        self.screen = pg.display.set_mode(self.G_resolution) # Display Setting
+        if (self.render_mode == 'human'): # Display Setting
+            self.screen = pg.display.set_mode(self.G_resolution) 
+        elif (self.render_mode == 'hidden'):
+            self.screen = pg.display.set_mode(self.G_resolution, pg.HIDDEN)
 
         # clock 생성
         self.G_clock = pg.time.Clock()
@@ -535,17 +558,6 @@ class Env_Gridpurrld(gym.Env):
         if (self.render_mode == 'human'):
             self.G_clock.tick(G_FPS)
             pg.display.update()
-    
-    # 화면 크롭
-    def render_crop(self, image):
-        ## image(height, width, channel)
-        # Grid만 crop
-        img_ref = image[self.grid_SP[1]:self.grid_EP[1], self.grid_SP[0]:self.grid_EP[0], :]
-        img_ref = np.transpose(np.ascontiguousarray(img_ref), axes=(2,0,1)) # C, H, W
-        img_ref = torch.tensor(img_ref, dtype=torch.float).to(DV)
-        img_ref = self.resizer(img_ref).unsqueeze(0)
-        
-        return img_ref
     
     
     ## 게임 종료
@@ -981,7 +993,7 @@ class Network_Q(nn.Module):
         return Q
 
 
-class Network_Q_conv(nn.Module):
+class ConvNetwork_Q(nn.Module):
     """
     state_space엔 정사각 image의 한 변의 길이가 들어가야 한다.
     """
@@ -994,8 +1006,8 @@ class Network_Q_conv(nn.Module):
         self.state_space = state_space**2
         
         # 레이어 설정
-        self.conv1 = nn.Conv2d(3, 8, kernel_size=5, stride=1, padding=2)
-        self.conv2 = nn.Conv2d(8, 16, kernel_size=3, stride=1, padding=1)
+        self.conv1 = nn.Conv2d(3, 16, kernel_size=5, stride=1, padding=2)
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1)
         self.fc1 = nn.Linear(self.state_space, 256)
         self.fc2 = nn.Linear(256, action_space)
         
@@ -1341,8 +1353,9 @@ class Agent_DQN:
         
         # policy 초기화
         if self.use_cnn:
-            self.net_Q = Network_Q_conv(alpha, self.S_dim, self.A_dim).to(DV)
-            self.net_Q_target = Network_Q_conv(alpha, self.S_dim, self.A_dim).to(DV)
+            # self.net_Q = Network_Q_conv(alpha, self.S_dim, self.A_dim).to(DV)
+            # self.net_Q_target = Network_Q_conv(alpha, self.S_dim, self.A_dim).to(DV)
+            pass
         else:
             self.net_Q = Network_Q(alpha, self.S_dim, self.A_dim).to(DV)
             self.net_Q_target = Network_Q(alpha, self.S_dim, self.A_dim).to(DV)
@@ -1548,8 +1561,10 @@ class Agent_DDQN:
         self.A_dim = env.action_space.n
         
         # policy 초기화
-        self.net_Q_outer = Network_Q(alpha, self.S_dim, self.A_dim).to(DV) # evaluation
-        self.net_Q_inner = Network_Q(alpha, self.S_dim, self.A_dim).to(DV) # selection (target net)
+        self.net_Q_outer = ConvNetwork_Q(alpha, self.S_dim, self.A_dim).to(DV) # evaluation
+        self.net_Q_inner = ConvNetwork_Q(alpha, self.S_dim, self.A_dim).to(DV) # selection (target net)
+        # self.net_Q_outer = Network_Q(alpha, self.S_dim, self.A_dim).to(DV) # evaluation
+        # self.net_Q_inner = Network_Q(alpha, self.S_dim, self.A_dim).to(DV) # selection (target net)
         self.target_update()
         
         # Hyperparameter
@@ -2223,8 +2238,8 @@ def play_agent(env_render='agent', env_stage=0, env_grid=(9,7), env_collect=Fals
 
 #%% 플레이
 
-# play_human(env_stage=4, env_grid=(9,9), env_collect=True, beh_save=True)
+# play_human(env_stage=4, env_grid=(9,9), env_collect=True, beh_save=False)
 
-play_agent(env_render='agent', env_stage=4, env_grid=(9,9), env_collect=True, env_state='ego',
-          model_name='DDQN', model_ST=50, model_EL=1000, model_ED=0.9999,
-          play_type='load', beh_save=True)
+play_agent(env_render='hidden', env_stage=4, env_grid=(9,9), env_collect=True, env_state='image',
+          model_name='DDQN', model_ST=1000, model_EL=20000, model_ED=0.9999,
+          play_type='save', beh_save=False)
